@@ -1,0 +1,26 @@
+# Render blueprint — deploys the coordinator as a free Docker web service.
+# World files live in Cloudflare R2 (durable); Render's disk is ephemeral, but the
+# coordinator rebuilds its world version from R2 on every boot, so cold starts are safe.
+services:
+  - type: web
+    name: serverless-valheim
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    branch: feat/phase0-coordinator-r2
+    healthCheckPath: /api/state
+    envVars:
+      # Secrets — set these in the Render dashboard (sync: false keeps them out of git).
+      - key: GROUP_PASSPHRASE
+        sync: false
+      - key: ADMIN_PASSPHRASE
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      # Non-secret — safe to commit.
+      - key: R2_BUCKET
+        value: valheim-worlds
