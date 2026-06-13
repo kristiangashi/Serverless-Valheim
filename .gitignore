@@ -1,0 +1,11 @@
+# .NET build output
+bin/
+obj/
+*.user
+
+# Local coordinator data (world archives + state.json) — never commit saves
+data/
+
+# IDE
+.vs/
+.idea/
