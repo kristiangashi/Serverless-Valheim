@@ -41,6 +41,36 @@ distributed lock + versioned file sync:
 - **Blob storage** — `IBlobStorage` abstraction. Phase 0 uses local disk (`LocalDiskBlobStorage`).
   **Production should use Cloudflare R2** (free 10 GB, no egress) because Railway's disk is ephemeral.
 - **Web UI** — single static page in `wwwroot/index.html`.
+- **Helper app** — WinForms desktop app (`src/Helper`) that auto-syncs the world into the
+  Valheim folder. This is the Phase 1 product friends actually run (below).
+
+## The helper app (Phase 1)
+
+`src/Helper` is a Windows desktop app (`ValheimWorldKeeper`) that removes the manual
+zip/drag step. Friends double-click one `.exe` and:
+
+1. **Settings** (saved to `%APPDATA%\ServerlessValheim\config.json`): name, group passphrase,
+   world name, and the Valheim worlds folder (auto-detected:
+   `%USERPROFILE%\AppData\LocalLow\IronGate\Valheim\worlds_local`).
+2. **Host this world** → claims the lock, downloads the latest world, and unzips the
+   `.db`/`.fwl` into the Valheim folder.
+3. **Launch Valheim** (via Steam), host the world in-game, paste the join code → **Share**.
+4. While hosting: a 30s heartbeat keeps the lock alive; optional auto-save every 10 min.
+5. **Stop hosting** — or just close Valheim (auto-detected) — zips the world, uploads it
+   (bumping the version), and releases the lock so the next person can host.
+
+The join code is still typed by hand: Valheim only shows the crossplay code in-game, so no
+app can read it automatically.
+
+### Build a shareable single-file exe
+
+```powershell
+dotnet publish src/Helper/Helper.csproj -c Release -r win-x64 --self-contained `
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+```
+
+The result is one `ValheimWorldKeeper.exe` (runtime bundled — no .NET install needed) under
+`src/Helper/bin/Release/net10.0-windows/win-x64/publish/`. Send that to your friends.
 
 ## Run locally
 

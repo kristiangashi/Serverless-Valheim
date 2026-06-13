@@ -89,6 +89,15 @@ app.MapPost("/api/admin/force-release", (AdminRequest req, WorldStore s) =>
     return Results.Ok();
 });
 
+// Start a brand-new world: wipe all stored archives and reset to version 0.
+app.MapPost("/api/admin/reset", async (AdminRequest req, WorldStore s, CancellationToken ct) =>
+{
+    if (!string.Equals(req.AdminPassphrase, adminPassphrase, StringComparison.Ordinal))
+        return Results.Json(new { error = "Wrong admin passphrase." }, statusCode: 401);
+    await s.ResetAsync(ct);
+    return Results.Ok(new { reset = true });
+});
+
 app.MapPost("/api/upload", async (HttpRequest http, WorldStore s, CancellationToken ct) =>
 {
     if (!http.HasFormContentType) return Results.BadRequest(new { error = "Expected multipart form upload." });
