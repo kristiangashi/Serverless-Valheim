@@ -81,6 +81,14 @@ public sealed partial class R2BlobStorage : IBlobStorage
         return latest;
     }
 
+    public async Task DeleteAllAsync(CancellationToken ct = default)
+    {
+        foreach (var (key, _) in await ListVersionsAsync(ct))
+        {
+            try { await _s3.DeleteObjectAsync(_bucket, key, ct); } catch { /* best effort */ }
+        }
+    }
+
     private async Task<List<(string Key, int Version)>> ListVersionsAsync(CancellationToken ct)
     {
         var results = new List<(string, int)>();
@@ -89,7 +97,8 @@ public sealed partial class R2BlobStorage : IBlobStorage
         do
         {
             resp = await _s3.ListObjectsV2Async(request, ct);
-            foreach (var obj in resp.S3Objects)
+            // AWS SDK v4 returns null (not an empty list) when the bucket/prefix has no objects.
+            foreach (var obj in resp.S3Objects ?? [])
             {
                 var m = VersionRegex().Match(obj.Key);
                 if (m.Success && int.TryParse(m.Groups[1].Value, out var v)) results.Add((obj.Key, v));

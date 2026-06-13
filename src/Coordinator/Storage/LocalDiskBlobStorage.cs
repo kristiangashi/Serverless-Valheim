@@ -60,6 +60,15 @@ public sealed partial class LocalDiskBlobStorage : IBlobStorage
         return Task.FromResult(latest);
     }
 
+    public Task DeleteAllAsync(CancellationToken ct = default)
+    {
+        foreach (var file in Directory.EnumerateFiles(_dir, "world-v*.zip"))
+        {
+            try { File.Delete(file); } catch { /* best effort */ }
+        }
+        return Task.CompletedTask;
+    }
+
     [GeneratedRegex(@"^world-v(\d+)\.zip$")]
     private static partial Regex VersionRegex();
 }

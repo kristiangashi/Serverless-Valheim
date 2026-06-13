@@ -21,4 +21,7 @@ public interface IBlobStorage
     /// version after a coordinator restart (e.g. Railway's ephemeral disk wipes local state).
     /// </summary>
     Task<int> GetLatestVersionAsync(CancellationToken ct = default);
+
+    /// <summary>Delete every world archive. Used by the admin reset / start-a-new-world flow.</summary>
+    Task DeleteAllAsync(CancellationToken ct = default);
 }

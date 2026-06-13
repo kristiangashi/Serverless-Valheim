@@ -7,7 +7,7 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     plan: free
-    branch: feat/phase0-coordinator-r2
+    branch: main
     healthCheckPath: /api/state
     envVars:
       # Secrets — set these in the Render dashboard (sync: false keeps them out of git).

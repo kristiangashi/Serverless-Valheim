@@ -221,6 +221,21 @@ public sealed class WorldStore
         }
     }
 
+    /// <summary>
+    /// Admin "start a brand-new world": purge every stored archive and reset to version 0.
+    /// Deletes blobs first so a crash mid-reset can't leave state pointing at gone data; the
+    /// reverse order could orphan blobs but never lose a referenced one.
+    /// </summary>
+    public async Task ResetAsync(CancellationToken ct = default)
+    {
+        await _blobs.DeleteAllAsync(ct);
+        lock (_gate)
+        {
+            _state = new WorldState();
+            Persist();
+        }
+    }
+
     public Task SaveBlobAsync(int version, Stream content, CancellationToken ct) =>
         _blobs.SaveAsync(version, content, ct);
 
