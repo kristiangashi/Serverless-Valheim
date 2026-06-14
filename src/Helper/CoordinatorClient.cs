@@ -12,7 +12,8 @@ public sealed record CoordinatorState(
     [property: JsonPropertyName("locked")] bool Locked,
     [property: JsonPropertyName("hostName")] string? HostName,
     [property: JsonPropertyName("joinCode")] string? JoinCode,
-    [property: JsonPropertyName("secondsUntilExpiry")] int? SecondsUntilExpiry);
+    [property: JsonPropertyName("secondsUntilExpiry")] int? SecondsUntilExpiry,
+    [property: JsonPropertyName("lastUpdatedAt")] DateTimeOffset? LastUpdatedAt);
 
 /// <summary>Raised when the coordinator returns a non-success status, carrying its error message.</summary>
 public sealed class CoordinatorException(string message) : Exception(message);

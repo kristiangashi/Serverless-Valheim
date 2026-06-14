@@ -404,7 +404,8 @@ public sealed partial class MainForm : Form
                 _lblStatus.ForeColor = Color.DimGray;
             }
 
-            _lblDetail.Text = $"World v{state.Version}"
+            var saved = state.LastUpdatedAt is { } when ? $"  ·  saved {when.ToLocalTime():MMM d, h:mm tt}" : "";
+            _lblDetail.Text = $"World v{state.Version}{saved}"
                 + (state.Locked && state.SecondsUntilExpiry is { } s ? $"  ·  lease {s}s" : "");
 
             // Joiner sees the code; host gets the field to share one.

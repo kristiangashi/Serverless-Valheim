@@ -9,6 +9,9 @@ public sealed class WorldState
     /// <summary>True once at least one world archive has been uploaded.</summary>
     public bool HasWorld { get; set; }
 
+    /// <summary>When the current version was uploaded. Null until the first upload.</summary>
+    public DateTimeOffset? LastUpdatedAt { get; set; }
+
     /// <summary>Display name of the current lock holder, or null if free.</summary>
     public string? HostName { get; set; }
 
@@ -30,4 +33,5 @@ public sealed record PublicState(
     string? HostName,
     string? JoinCode,
     DateTimeOffset? LeaseExpiresAt,
-    int? SecondsUntilExpiry);
+    int? SecondsUntilExpiry,
+    DateTimeOffset? LastUpdatedAt);

@@ -17,10 +17,10 @@ public interface IBlobStorage
     Task PruneAsync(int currentVersion, int keep, CancellationToken ct = default);
 
     /// <summary>
-    /// Highest world version present in storage, or 0 if none. Used at startup to recover the
-    /// version after a coordinator restart (e.g. Railway's ephemeral disk wipes local state).
+    /// Highest world version present in storage (0 if none) and when it was last written. Used at
+    /// startup to recover the version + save date after a restart (e.g. ephemeral disk wipes state).
     /// </summary>
-    Task<int> GetLatestVersionAsync(CancellationToken ct = default);
+    Task<(int Version, DateTimeOffset? UpdatedAt)> GetLatestAsync(CancellationToken ct = default);
 
     /// <summary>Delete every world archive. Used by the admin reset / start-a-new-world flow.</summary>
     Task DeleteAllAsync(CancellationToken ct = default);

@@ -49,15 +49,17 @@ public sealed partial class LocalDiskBlobStorage : IBlobStorage
         return Task.CompletedTask;
     }
 
-    public Task<int> GetLatestVersionAsync(CancellationToken ct = default)
+    public Task<(int Version, DateTimeOffset? UpdatedAt)> GetLatestAsync(CancellationToken ct = default)
     {
         var latest = 0;
+        string? latestFile = null;
         foreach (var file in Directory.EnumerateFiles(_dir, "world-v*.zip"))
         {
             var m = VersionRegex().Match(Path.GetFileName(file));
-            if (m.Success && int.TryParse(m.Groups[1].Value, out var v) && v > latest) latest = v;
+            if (m.Success && int.TryParse(m.Groups[1].Value, out var v) && v > latest) { latest = v; latestFile = file; }
         }
-        return Task.FromResult(latest);
+        DateTimeOffset? updated = latestFile is not null ? File.GetLastWriteTimeUtc(latestFile) : null;
+        return Task.FromResult((latest, updated));
     }
 
     public Task DeleteAllAsync(CancellationToken ct = default)
