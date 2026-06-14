@@ -18,6 +18,9 @@ var groupPassphrase = Cfg("GROUP_PASSPHRASE", "valheim");
 var adminPassphrase = Cfg("ADMIN_PASSPHRASE", "changeme-admin");
 var leaseMinutes = int.TryParse(Cfg("LEASE_MINUTES", "5"), out var lm) ? lm : 5;
 var keepVersions = int.TryParse(Cfg("KEEP_VERSIONS", "3"), out var kv) ? kv : 3;
+// Where /download sends friends — GitHub's "latest release" URL serves the newest installer.
+var helperDownloadUrl = Cfg("HELPER_DOWNLOAD_URL",
+    "https://github.com/kristiangashi/Serverless-Valheim/releases/latest/download/ValheimWorldKeeper-Setup.exe");
 
 // Railway (and most PaaS) inject the port to bind via $PORT.
 if (Environment.GetEnvironmentVariable("PORT") is { Length: > 0 } port)
@@ -44,6 +47,9 @@ var app = builder.Build();
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
+
+// One-click installer download for friends — always redirects to the latest published release.
+app.MapGet("/download", () => Results.Redirect(helperDownloadUrl));
 
 // --- Helpers ---
 static IResult Map(OpResult r, string verb) => r switch

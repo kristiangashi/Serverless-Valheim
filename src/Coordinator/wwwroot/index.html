@@ -48,6 +48,13 @@
   .btn-green { background: var(--green); color: #10210a; }
   .btn-blue { background: var(--blue); color: #0a1424; }
   .btn-ghost { background: transparent; border: 1px solid var(--edge); color: var(--muted); }
+  .download-btn {
+    display: block; text-align: center; text-decoration: none;
+    background: var(--accent); color: #20160c; font-weight: 700; font-size: 1.05rem;
+    padding: 14px; border-radius: 10px; margin-bottom: 16px;
+  }
+  .download-btn:hover { filter: brightness(1.1); }
+  .download-btn small { display: block; font-weight: 400; font-size: .75rem; opacity: .85; margin-top: 3px; }
   .row { display: flex; gap: 10px; }
   .row button { width: 100%; }
   .hint { font-size: .8rem; color: var(--muted); margin: 6px 0 0; line-height: 1.4; }
@@ -69,6 +76,8 @@
 <div class="wrap">
   <h1>🛡️ Valheim World Keeper</h1>
   <p class="sub">One shared world. Whoever's free can host it — everyone else joins them.</p>
+
+  <a class="download-btn" href="/download">⬇ Download the app (Windows)<small>One-click installer — run it, then you're set</small></a>
 
   <!-- Identity -->
   <div class="card">
