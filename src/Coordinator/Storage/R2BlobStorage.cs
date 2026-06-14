@@ -64,7 +64,7 @@ public sealed partial class R2BlobStorage : IBlobStorage
 
     public async Task PruneAsync(int currentVersion, int keep, CancellationToken ct = default)
     {
-        foreach (var (key, v) in await ListVersionsAsync(ct))
+        foreach (var (key, v, _) in await ListVersionsAsync(ct))
         {
             if (v <= currentVersion - keep)
             {
@@ -73,25 +73,26 @@ public sealed partial class R2BlobStorage : IBlobStorage
         }
     }
 
-    public async Task<int> GetLatestVersionAsync(CancellationToken ct = default)
+    public async Task<(int Version, DateTimeOffset? UpdatedAt)> GetLatestAsync(CancellationToken ct = default)
     {
         var latest = 0;
-        foreach (var (_, v) in await ListVersionsAsync(ct))
-            if (v > latest) latest = v;
-        return latest;
+        DateTimeOffset? updated = null;
+        foreach (var (_, v, modified) in await ListVersionsAsync(ct))
+            if (v > latest) { latest = v; updated = modified; }
+        return (latest, updated);
     }
 
     public async Task DeleteAllAsync(CancellationToken ct = default)
     {
-        foreach (var (key, _) in await ListVersionsAsync(ct))
+        foreach (var (key, _, _) in await ListVersionsAsync(ct))
         {
             try { await _s3.DeleteObjectAsync(_bucket, key, ct); } catch { /* best effort */ }
         }
     }
 
-    private async Task<List<(string Key, int Version)>> ListVersionsAsync(CancellationToken ct)
+    private async Task<List<(string Key, int Version, DateTimeOffset? Modified)>> ListVersionsAsync(CancellationToken ct)
     {
-        var results = new List<(string, int)>();
+        var results = new List<(string, int, DateTimeOffset?)>();
         var request = new ListObjectsV2Request { BucketName = _bucket, Prefix = "world-v" };
         ListObjectsV2Response resp;
         do
@@ -101,7 +102,11 @@ public sealed partial class R2BlobStorage : IBlobStorage
             foreach (var obj in resp.S3Objects ?? [])
             {
                 var m = VersionRegex().Match(obj.Key);
-                if (m.Success && int.TryParse(m.Groups[1].Value, out var v)) results.Add((obj.Key, v));
+                if (m.Success && int.TryParse(m.Groups[1].Value, out var v))
+                {
+                    DateTimeOffset? modified = obj.LastModified is { } dt ? dt : null;
+                    results.Add((obj.Key, v, modified));
+                }
             }
             request.ContinuationToken = resp.NextContinuationToken;
         } while (resp.IsTruncated == true);

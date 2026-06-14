@@ -40,11 +40,15 @@ public sealed class WorldStore
     {
         try
         {
-            var latest = _blobs.GetLatestVersionAsync().GetAwaiter().GetResult();
+            var (latest, updatedAt) = _blobs.GetLatestAsync().GetAwaiter().GetResult();
             if (latest > 0)
             {
                 _state.HasWorld = true;
-                if (latest > _state.Version) _state.Version = latest;
+                if (latest >= _state.Version)
+                {
+                    _state.Version = latest;
+                    if (updatedAt is not null) _state.LastUpdatedAt = updatedAt; // recover save date after a redeploy
+                }
                 Persist();
             }
         }
@@ -92,7 +96,7 @@ public sealed class WorldStore
                 ? (int)Math.Max(0, (e - DateTimeOffset.UtcNow).TotalSeconds)
                 : null;
             return new PublicState(_state.Version, _state.HasWorld, locked,
-                _state.HostName, _state.JoinCode, _state.LeaseExpiresAt, secs);
+                _state.HostName, _state.JoinCode, _state.LeaseExpiresAt, secs, _state.LastUpdatedAt);
         }
     }
 
@@ -175,6 +179,7 @@ public sealed class WorldStore
 
             _state.Version = newVersion;
             _state.HasWorld = true;
+            _state.LastUpdatedAt = DateTimeOffset.UtcNow;
             if (release)
             {
                 _state.LockToken = null;

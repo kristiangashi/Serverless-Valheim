@@ -1,10 +1,21 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace Helper;
 
-public sealed class MainForm : Form
+public sealed partial class MainForm : Form
 {
     private const string ValheimSteamAppId = "892970";
+    private const int WM_QUERYENDSESSION = 0x0011;
+
+    // Tell Windows we're blocking shutdown/restart (and why) while a world sync is in flight.
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShutdownBlockReasonCreate(IntPtr hWnd, string pwszReason);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShutdownBlockReasonDestroy(IntPtr hWnd);
 
     private readonly AppConfig _config;
     private CoordinatorClient? _client;
@@ -22,6 +33,7 @@ public sealed class MainForm : Form
     private readonly TextBox _txtWorldsFolder = NewText();
     private readonly TextBox _txtUrl = NewText();
     private readonly CheckBox _chkAutoSave = new() { Text = "Auto-save every 10 min while hosting", AutoSize = true };
+    private readonly CheckBox _chkAutoLaunch = new() { Text = "Launch Valheim automatically when the world is ready", AutoSize = true };
     private readonly Button _btnSaveSettings = new() { Text = "Save settings", AutoSize = true };
 
     private readonly Label _lblStatus = new() { AutoSize = false, Height = 32, Font = new Font("Segoe UI", 13, FontStyle.Bold), Dock = DockStyle.Top };
@@ -56,7 +68,7 @@ public sealed class MainForm : Form
         _config = AppConfig.Load();
         Text = "Valheim World Keeper";
         Width = 480;
-        Height = 660;
+        Height = 700;
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9);
 
@@ -97,7 +109,7 @@ public sealed class MainForm : Form
             WrapContents = false, AutoScroll = true, Padding = new Padding(12),
         };
 
-        var settings = new GroupBox { Text = "Settings", Width = 430, Height = 250 };
+        var settings = new GroupBox { Text = "Settings", Width = 430, Height = 290 };
         var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(8) };
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -116,6 +128,9 @@ public sealed class MainForm : Form
         grid.RowCount++;
         grid.Controls.Add(_chkAutoSave);
         grid.SetColumnSpan(_chkAutoSave, 2);
+        grid.RowCount++;
+        grid.Controls.Add(_chkAutoLaunch);
+        grid.SetColumnSpan(_chkAutoLaunch, 2);
         grid.RowCount++;
         grid.Controls.Add(_btnSaveSettings);
         settings.Controls.Add(grid);
@@ -158,6 +173,7 @@ public sealed class MainForm : Form
         _txtWorldsFolder.Text = _config.WorldsFolder;
         _txtUrl.Text = _config.CoordinatorUrl;
         _chkAutoSave.Checked = _config.AutoSaveWhileHosting;
+        _chkAutoLaunch.Checked = _config.AutoLaunchWhenReady;
     }
 
     private void SaveSettings()
@@ -168,6 +184,7 @@ public sealed class MainForm : Form
         _config.WorldsFolder = _txtWorldsFolder.Text.Trim();
         _config.CoordinatorUrl = _txtUrl.Text.Trim();
         _config.AutoSaveWhileHosting = _chkAutoSave.Checked;
+        _config.AutoLaunchWhenReady = _chkAutoLaunch.Checked;
         _config.Save();
         RebuildClient();
         Log("Settings saved.");
@@ -190,7 +207,8 @@ public sealed class MainForm : Form
             return;
         }
 
-        _busy = true; UpdateButtons();
+        SetBusy(true);
+        var worldReady = true;
         try
         {
             Log("Claiming the world lock…");
@@ -213,6 +231,7 @@ public sealed class MainForm : Form
             }
             else
             {
+                worldReady = false;
                 Warn($"No world on the server and no local \"{_config.WorldName}\" found in {_config.WorldsFolder}. " +
                      "Create the world in Valheim first, then click Stop hosting to upload it.");
             }
@@ -221,6 +240,7 @@ public sealed class MainForm : Form
             _tmrHeartbeat.Start();
             if (_config.AutoSaveWhileHosting) _tmrAutoSave.Start();
             Log("You're hosting. Launch Valheim, host the world, then share your join code.");
+            if (worldReady && _config.AutoLaunchWhenReady) LaunchValheim();
         }
         catch (CoordinatorException ex)
         {
@@ -234,7 +254,7 @@ public sealed class MainForm : Form
         }
         finally
         {
-            _busy = false;
+            SetBusy(false);
             await RefreshStateAsync();
         }
     }
@@ -242,7 +262,7 @@ public sealed class MainForm : Form
     private async Task StopHostingAsync(bool auto)
     {
         if (_token is null || _busy) return;
-        _busy = true; UpdateButtons();
+        SetBusy(true);
         try
         {
             if (WorldFiles.ExistingFiles(_config.WorldsFolder, _config.WorldName).Any())
@@ -272,7 +292,7 @@ public sealed class MainForm : Form
         finally
         {
             if (_token is null) { _tmrHeartbeat.Stop(); _tmrAutoSave.Stop(); _valheimSeenRunning = false; }
-            _busy = false;
+            SetBusy(false);
             await RefreshStateAsync();
         }
     }
@@ -283,7 +303,7 @@ public sealed class MainForm : Form
         if (!IsValheimRunning()) return; // only autosave mid-session
         if (!WorldFiles.ExistingFiles(_config.WorldsFolder, _config.WorldName).Any()) return;
 
-        _busy = true;
+        SetBusy(true);
         try
         {
             var zip = WorldFiles.CreateZip(_config.WorldsFolder, _config.WorldName);
@@ -296,7 +316,7 @@ public sealed class MainForm : Form
             finally { try { File.Delete(zip); } catch { } }
         }
         catch (Exception ex) { Log($"Auto-save skipped: {ex.Message}"); }
-        finally { _busy = false; }
+        finally { SetBusy(false); }
     }
 
     private async Task ShareJoinCodeAsync()
@@ -384,7 +404,8 @@ public sealed class MainForm : Form
                 _lblStatus.ForeColor = Color.DimGray;
             }
 
-            _lblDetail.Text = $"World v{state.Version}"
+            var saved = state.LastUpdatedAt is { } when ? $"  ·  saved {when.ToLocalTime():MMM d, h:mm tt}" : "";
+            _lblDetail.Text = $"World v{state.Version}{saved}"
                 + (state.Locked && state.SecondsUntilExpiry is { } s ? $"  ·  lease {s}s" : "");
 
             // Joiner sees the code; host gets the field to share one.
@@ -409,12 +430,46 @@ public sealed class MainForm : Form
         var amHost = _token is not null;
         _btnHost.Enabled = !_busy && _client is not null && state is { Locked: false } && !amHost;
         _btnStop.Enabled = !_busy && amHost;
-        _btnLaunch.Enabled = amHost;
-        _btnShareCode.Enabled = amHost;
+        // Launch/Share are disabled mid-sync (_busy): a stale world could be opened while it's
+        // being overwritten by a download, and there's no code to share until hosting is settled.
+        _btnLaunch.Enabled = amHost && !_busy;
+        _btnShareCode.Enabled = amHost && !_busy;
+    }
+
+    // Centralizes the "a sync is in flight" state: button enablement + telling Windows not to
+    // shut down/restart mid-upload (shown to the user with a reason).
+    private void SetBusy(bool busy)
+    {
+        _busy = busy;
+        if (IsHandleCreated)
+        {
+            if (busy) ShutdownBlockReasonCreate(Handle, "Syncing your Valheim world to the cloud — don't shut down yet.");
+            else ShutdownBlockReasonDestroy(Handle);
+        }
+        UpdateButtons();
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        // Veto a shutdown/restart while a world sync is in progress (Windows shows our reason).
+        if (m.Msg == WM_QUERYENDSESSION && _busy)
+        {
+            m.Result = IntPtr.Zero;
+            return;
+        }
+        base.WndProc(ref m);
     }
 
     private void OnClosing(object? sender, FormClosingEventArgs e)
     {
+        if (_busy)
+        {
+            e.Cancel = true;
+            MessageBox.Show(
+                "Your world is still syncing to the cloud. Please wait for it to finish before closing the app.",
+                "Sync in progress", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
         if (_token is not null)
         {
             var r = MessageBox.Show(
