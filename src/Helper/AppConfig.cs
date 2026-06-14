@@ -11,6 +11,7 @@ public sealed class AppConfig
     public string WorldName { get; set; } = "";
     public string WorldsFolder { get; set; } = DefaultWorldsFolder();
     public bool AutoSaveWhileHosting { get; set; } = true;
+    public bool AutoLaunchWhenReady { get; set; } = false;
 
     private static string ConfigPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
