@@ -6,6 +6,10 @@ obj/
 # Local coordinator data (world archives + state.json) — never commit saves
 data/
 
+# Release artifacts (built by CI)
+publish/
+installer/output/
+
 # IDE
 .vs/
 .idea/

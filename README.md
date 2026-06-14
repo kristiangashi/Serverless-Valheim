@@ -66,11 +66,31 @@ app can read it automatically.
 
 ```powershell
 dotnet publish src/Helper/Helper.csproj -c Release -r win-x64 --self-contained `
-  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 ```
 
-The result is one `ValheimWorldKeeper.exe` (runtime bundled — no .NET install needed) under
-`src/Helper/bin/Release/net10.0-windows/win-x64/publish/`. Send that to your friends.
+The result is one `ValheimWorldKeeper.exe` (~116 MB, runtime bundled — no .NET install needed)
+in `publish/`.
+
+### Releasing to friends (automated)
+
+Distribution is automated via GitHub Releases — friends download the installer, not a raw exe.
+Pushing a version tag triggers [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which on a Windows runner:
+
+1. Publishes the single-file self-contained exe.
+2. Runs Inno Setup ([`installer/ValheimWorldKeeper.iss`](installer/ValheimWorldKeeper.iss)) to
+   build `ValheimWorldKeeper-Setup.exe` (per-user install, no admin; Start Menu entry; optional
+   desktop shortcut, pre-checked; clean uninstaller).
+3. Publishes a GitHub Release with the installer (and the raw exe) attached.
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+Friends grab `ValheimWorldKeeper-Setup.exe` from the repo's **Releases** page and run it. The
+helper auto-detects their Valheim `worlds_local` folder at first launch.
 
 ## Run locally
 
