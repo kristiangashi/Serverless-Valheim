@@ -14,11 +14,14 @@ public enum OpResult { Ok, Conflict, Forbidden, BadVersion, NotFound }
 /// </summary>
 public sealed class WorldStore
 {
+    public const int MinKeep = 2;
+    public const int MaxKeep = 10;
+
     private readonly object _gate = new();
     private readonly string _statePath;
     private readonly IBlobStorage _blobs;
     private readonly TimeSpan _leaseDuration;
-    private readonly int _keepVersions;
+    private readonly int _keepVersionsDefault;
     private WorldState _state;
 
     public WorldStore(IBlobStorage blobs, string dataDir, TimeSpan leaseDuration, int keepVersions)
@@ -26,10 +29,25 @@ public sealed class WorldStore
         _blobs = blobs;
         _statePath = Path.Combine(dataDir, "state.json");
         _leaseDuration = leaseDuration;
-        _keepVersions = keepVersions;
+        _keepVersionsDefault = Math.Clamp(keepVersions, MinKeep, MaxKeep);
         Directory.CreateDirectory(dataDir);
         _state = Load();
         ReconcileWithStorage();
+    }
+
+    // Effective keep count: admin override if set, else the configured default. Always clamped.
+    private int EffectiveKeep => Math.Clamp(_state.KeepVersions ?? _keepVersionsDefault, MinKeep, MaxKeep);
+
+    /// <summary>Set how many recent versions to keep (clamped to [MinKeep, MaxKeep]). Returns applied value.</summary>
+    public int SetKeepVersions(int n)
+    {
+        lock (_gate)
+        {
+            var applied = Math.Clamp(n, MinKeep, MaxKeep);
+            _state.KeepVersions = applied;
+            Persist();
+            return applied;
+        }
     }
 
     // If the blob store holds a newer version than our local state (e.g. local state was wiped by
@@ -96,7 +114,7 @@ public sealed class WorldStore
                 ? (int)Math.Max(0, (e - DateTimeOffset.UtcNow).TotalSeconds)
                 : null;
             return new PublicState(_state.Version, _state.HasWorld, locked,
-                _state.HostName, _state.JoinCode, _state.LeaseExpiresAt, secs, _state.LastUpdatedAt);
+                _state.HostName, _state.JoinCode, _state.LeaseExpiresAt, secs, _state.LastUpdatedAt, EffectiveKeep);
         }
     }
 
@@ -244,8 +262,12 @@ public sealed class WorldStore
     public Task SaveBlobAsync(int version, Stream content, CancellationToken ct) =>
         _blobs.SaveAsync(version, content, ct);
 
-    public Task PruneBlobsAsync(CancellationToken ct) =>
-        _blobs.PruneAsync(CurrentVersion, _keepVersions, ct);
+    public Task PruneBlobsAsync(CancellationToken ct)
+    {
+        int version, keep;
+        lock (_gate) { version = _state.Version; keep = EffectiveKeep; }
+        return _blobs.PruneAsync(version, keep, ct);
+    }
 
     public Task<Stream?> OpenLatestBlobAsync(CancellationToken ct) =>
         _blobs.OpenAsync(CurrentVersion, ct);

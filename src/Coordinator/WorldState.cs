@@ -12,6 +12,9 @@ public sealed class WorldState
     /// <summary>When the current version was uploaded. Null until the first upload.</summary>
     public DateTimeOffset? LastUpdatedAt { get; set; }
 
+    /// <summary>Admin-set number of recent versions to keep. Null = use the configured default.</summary>
+    public int? KeepVersions { get; set; }
+
     /// <summary>Display name of the current lock holder, or null if free.</summary>
     public string? HostName { get; set; }
 
@@ -34,4 +37,5 @@ public sealed record PublicState(
     string? JoinCode,
     DateTimeOffset? LeaseExpiresAt,
     int? SecondsUntilExpiry,
-    DateTimeOffset? LastUpdatedAt);
+    DateTimeOffset? LastUpdatedAt,
+    int KeepVersions);

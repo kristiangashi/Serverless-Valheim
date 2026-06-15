@@ -143,6 +143,14 @@
       <input type="password" id="adminPass" autocomplete="off" />
       <button class="btn-ghost" id="forceBtn">Force-release the lock</button>
       <p class="hint">Use only if a host crashed and the world is stuck locked (it auto-frees after the lease expires anyway).</p>
+
+      <hr />
+      <label for="keepInput">Backups to keep (2–10)</label>
+      <div class="row">
+        <input type="number" id="keepInput" min="2" max="10" step="1" value="3" />
+        <button class="btn-ghost" id="keepBtn" style="width:auto; white-space:nowrap;">Save</button>
+      </div>
+      <p class="hint">How many recent world copies to store. Older ones are deleted after each save.</p>
     </details>
   </div>
 </div>
@@ -209,6 +217,9 @@ function render(state) {
 
   $('claimCard').style.display = (!state.locked) ? 'block' : 'none';
   $('hostCard').style.display = amHost ? 'block' : 'none';
+
+  // Reflect the current backups-to-keep setting unless the admin is editing the field.
+  if (state.keepVersions && document.activeElement !== $('keepInput')) $('keepInput').value = state.keepVersions;
 }
 
 async function refresh() {
@@ -296,6 +307,17 @@ $('forceBtn').addEventListener('click', async () => {
     });
     toast('Lock force-released');
     refresh();
+  } catch (e) { toast(e.message, true); }
+});
+
+$('keepBtn').addEventListener('click', async () => {
+  try {
+    const r = await api('/api/admin/keep-versions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ adminPassphrase: $('adminPass').value, keep: parseInt($('keepInput').value, 10) }),
+    });
+    $('keepInput').value = r.keepVersions;
+    toast('Now keeping ' + r.keepVersions + ' backups');
   } catch (e) { toast(e.message, true); }
 });
 

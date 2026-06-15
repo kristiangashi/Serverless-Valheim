@@ -110,7 +110,7 @@ Then open the printed `http://localhost:<port>`. Default group passphrase is `va
 | `ADMIN_PASSPHRASE` | `changeme-admin` | For force-releasing a stuck lock. **Change this.** |
 | `DATA_DIR` | `data` | Where state + world archives are stored. |
 | `LEASE_MINUTES` | `5` | How long a lock survives without a heartbeat. |
-| `KEEP_VERSIONS` | `3` | How many old world versions to retain. |
+| `KEEP_VERSIONS` | `3` | Default number of recent world versions to retain (older blobs pruned after each upload). Adjustable at runtime in the web Admin tools, clamped to 2–10. |
 | `R2_ACCOUNT_ID` | — | Cloudflare account ID. Set all four `R2_*` to use R2. |
 | `R2_ACCESS_KEY_ID` | — | R2 API token Access Key ID. |
 | `R2_SECRET_ACCESS_KEY` | — | R2 API token Secret Access Key. |
