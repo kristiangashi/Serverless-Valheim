@@ -104,6 +104,14 @@ app.MapPost("/api/admin/reset", async (AdminRequest req, WorldStore s, Cancellat
     return Results.Ok(new { reset = true });
 });
 
+// Set how many recent world versions to keep (older ones are pruned after each upload).
+app.MapPost("/api/admin/keep-versions", (KeepRequest req, WorldStore s) =>
+{
+    if (!string.Equals(req.AdminPassphrase, adminPassphrase, StringComparison.Ordinal))
+        return Results.Json(new { error = "Wrong admin passphrase." }, statusCode: 401);
+    return Results.Ok(new { keepVersions = s.SetKeepVersions(req.Keep) });
+});
+
 app.MapPost("/api/upload", async (HttpRequest http, WorldStore s, CancellationToken ct) =>
 {
     if (!http.HasFormContentType) return Results.BadRequest(new { error = "Expected multipart form upload." });
@@ -148,3 +156,4 @@ record ClaimRequest(string DisplayName, string Passphrase);
 record TokenRequest(string Token);
 record JoinCodeRequest(string Token, string JoinCode);
 record AdminRequest(string AdminPassphrase);
+record KeepRequest(string AdminPassphrase, int Keep);
