@@ -13,6 +13,18 @@ public sealed class AppConfig
     public bool AutoSaveWhileHosting { get; set; } = true;
     public bool AutoLaunchWhenReady { get; set; } = false;
 
+    /// <summary>
+    /// Backstop interval for auto-saves. Normally uploads are triggered by Valheim writing the
+    /// world, so this only matters if the folder watcher can't be set up or misses an event.
+    /// </summary>
+    public int AutoSaveMinutes { get; set; } = 10;
+
+    public const int MinAutoSaveMinutes = 2;
+    public const int MaxAutoSaveMinutes = 60;
+
+    public int ClampedAutoSaveMinutes =>
+        Math.Clamp(AutoSaveMinutes, MinAutoSaveMinutes, MaxAutoSaveMinutes);
+
     private static string ConfigPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "ServerlessValheim", "config.json");
