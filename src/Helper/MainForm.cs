@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Runtime.InteropServices;
 
 namespace Helper;
@@ -33,7 +34,12 @@ public sealed partial class MainForm : Form
     private readonly TextBox _txtWorld = NewText();
     private readonly TextBox _txtWorldsFolder = NewText();
     private readonly TextBox _txtUrl = NewText();
-    private readonly CheckBox _chkAutoSave = new() { Text = "Auto-save every 10 min while hosting", AutoSize = true };
+    private readonly CheckBox _chkAutoSave = new() { Text = "Auto-save while hosting, and at most every", AutoSize = true };
+    private readonly NumericUpDown _numAutoSaveMinutes = new()
+    {
+        Minimum = AppConfig.MinAutoSaveMinutes, Maximum = AppConfig.MaxAutoSaveMinutes, Value = 10,
+    };
+    private readonly Label _lblAutoSaveUnit = new() { Text = "min", AutoSize = true };
     private readonly CheckBox _chkAutoLaunch = new() { Text = "Launch Valheim automatically when the world is ready", AutoSize = true };
     private readonly Button _btnSaveSettings = NewButton("Save settings");
 
@@ -72,7 +78,13 @@ public sealed partial class MainForm : Form
     private readonly System.Windows.Forms.Timer _tmrState = new() { Interval = 4000 };
     private readonly System.Windows.Forms.Timer _tmrHeartbeat = new() { Interval = 30000 };
     private readonly System.Windows.Forms.Timer _tmrValheim = new() { Interval = 5000 };
-    private readonly System.Windows.Forms.Timer _tmrAutoSave = new() { Interval = 600000 }; // 10 min
+    // Backstop only — auto-saves are normally driven by _worldWatcher below.
+    private readonly System.Windows.Forms.Timer _tmrAutoSave = new();
+    // Valheim writes the world in a burst; wait for it to go quiet before reading the file.
+    private readonly System.Windows.Forms.Timer _tmrSaveSettle = new() { Interval = 5000 };
+
+    private FileSystemWatcher? _worldWatcher;
+    private string? _lastUploadedFingerprint;
 
     public MainForm()
     {
@@ -94,10 +106,14 @@ public sealed partial class MainForm : Form
         _btnShareCode.Click += async (_, _) => await ShareJoinCodeAsync();
         _btnCopyCode.Click += (_, _) => { if (_lblJoinCode.Tag is string c) Clipboard.SetText(c); Log("Join code copied."); };
 
+        _chkAutoSave.CheckedChanged += (_, _) => _numAutoSaveMinutes.Enabled = _chkAutoSave.Checked;
+
         _tmrState.Tick += async (_, _) => await RefreshStateAsync();
         _tmrHeartbeat.Tick += async (_, _) => await HeartbeatAsync();
         _tmrValheim.Tick += async (_, _) => await WatchValheimAsync();
         _tmrAutoSave.Tick += async (_, _) => await AutoSaveAsync();
+        _tmrSaveSettle.Tick += async (_, _) => { _tmrSaveSettle.Stop(); await AutoSaveAsync(); };
+        _tmrAutoSave.Interval = (int)TimeSpan.FromMinutes(_config.ClampedAutoSaveMinutes).TotalMilliseconds;
 
         _tmrState.Start();
         _tmrValheim.Start();
@@ -186,11 +202,22 @@ public sealed partial class MainForm : Form
         Row("World name", _txtWorld);
         Row("Worlds folder", _txtWorldsFolder);
         Row("Coordinator URL", _txtUrl);
-        _chkAutoSave.Margin = new Padding(3, 8, 3, 2);
+        // "[x] Auto-save while hosting, and at most every [10] min" reads as one sentence, so keep
+        // the three controls on one wrapping line.
+        var autoSaveStrip = NewStrip();
+        autoSaveStrip.Margin = new Padding(0, 8, 0, 2);
+        _chkAutoSave.Margin = new Padding(3, 5, 3, 2);
+        _numAutoSaveMinutes.Width = LogicalToDeviceUnits(52);
+        _numAutoSaveMinutes.Margin = new Padding(3, 2, 3, 2);
+        _lblAutoSaveUnit.Margin = new Padding(0, 5, 3, 2);
+        autoSaveStrip.Controls.Add(_chkAutoSave);
+        autoSaveStrip.Controls.Add(_numAutoSaveMinutes);
+        autoSaveStrip.Controls.Add(_lblAutoSaveUnit);
+
         _chkAutoLaunch.Margin = new Padding(3, 2, 3, 2);
         _btnSaveSettings.Anchor = AnchorStyles.Left;
         _btnSaveSettings.Margin = new Padding(3, 10, 3, 3);
-        SpanRow(_chkAutoSave);
+        SpanRow(autoSaveStrip);
         SpanRow(_chkAutoLaunch);
         SpanRow(_btnSaveSettings);
         settings.Controls.Add(grid);
@@ -262,6 +289,8 @@ public sealed partial class MainForm : Form
         _txtWorldsFolder.Text = _config.WorldsFolder;
         _txtUrl.Text = _config.CoordinatorUrl;
         _chkAutoSave.Checked = _config.AutoSaveWhileHosting;
+        _numAutoSaveMinutes.Value = _config.ClampedAutoSaveMinutes;
+        _numAutoSaveMinutes.Enabled = _chkAutoSave.Checked;
         _chkAutoLaunch.Checked = _config.AutoLaunchWhenReady;
     }
 
@@ -273,9 +302,12 @@ public sealed partial class MainForm : Form
         _config.WorldsFolder = _txtWorldsFolder.Text.Trim();
         _config.CoordinatorUrl = _txtUrl.Text.Trim();
         _config.AutoSaveWhileHosting = _chkAutoSave.Checked;
+        _config.AutoSaveMinutes = (int)_numAutoSaveMinutes.Value;
         _config.AutoLaunchWhenReady = _chkAutoLaunch.Checked;
         _config.Save();
         RebuildClient();
+        _tmrAutoSave.Interval = (int)TimeSpan.FromMinutes(_config.ClampedAutoSaveMinutes).TotalMilliseconds;
+        if (_token is not null) StartWatchingWorld(); // folder or world name may have changed
         Log("Settings saved.");
         _ = RefreshStateAsync();
     }
@@ -325,9 +357,13 @@ public sealed partial class MainForm : Form
                      "Create the world in Valheim first, then click Stop hosting to upload it.");
             }
 
+            // Whatever is on disk right now either came from the server or is about to be the
+            // starting world — either way there's nothing new to upload until Valheim writes.
+            _lastUploadedFingerprint = WorldFiles.Fingerprint(_config.WorldsFolder, _config.WorldName);
+
             _valheimSeenRunning = false;
             _tmrHeartbeat.Start();
-            if (_config.AutoSaveWhileHosting) _tmrAutoSave.Start();
+            if (_config.AutoSaveWhileHosting) { _tmrAutoSave.Start(); StartWatchingWorld(); }
             Log("You're hosting. Launch Valheim, host the world, then share your join code.");
             if (worldReady && _config.AutoLaunchWhenReady) LaunchValheim();
         }
@@ -357,11 +393,14 @@ public sealed partial class MainForm : Form
             if (WorldFiles.ExistingFiles(_config.WorldsFolder, _config.WorldName).Any())
             {
                 Log(auto ? "Valheim closed — saving the world…" : "Saving the world…");
-                var zip = WorldFiles.CreateZip(_config.WorldsFolder, _config.WorldName);
+                var fingerprint = WorldFiles.Fingerprint(_config.WorldsFolder, _config.WorldName);
+                // Nobody is mid-fight by the time we release, so spend the CPU on a smaller upload.
+                var zip = await ZipInBackgroundAsync(CompressionLevel.Optimal);
                 try
                 {
                     var newVersion = await _client!.UploadAsync(_token, zip, finish: true, _baseVersion);
                     _baseVersion = newVersion;
+                    _lastUploadedFingerprint = fingerprint;
                     _token = null;
                     Log($"Saved as v{newVersion} and released. Someone else can host now.");
                 }
@@ -380,10 +419,59 @@ public sealed partial class MainForm : Form
         }
         finally
         {
-            if (_token is null) { _tmrHeartbeat.Stop(); _tmrAutoSave.Stop(); _valheimSeenRunning = false; }
+            if (_token is null)
+            {
+                _tmrHeartbeat.Stop(); _tmrAutoSave.Stop(); _tmrSaveSettle.Stop();
+                StopWatchingWorld();
+                _valheimSeenRunning = false;
+            }
             SetBusy(false);
             await RefreshStateAsync();
         }
+    }
+
+    // ---- Auto-save ----
+
+    // Valheim writes the world itself every few minutes, and that write is already a hitch in the
+    // game. Uploading just after it means our work lands in that same hitch instead of adding a
+    // second, independent one at a random moment (which is what a blind timer did).
+    private void StartWatchingWorld()
+    {
+        StopWatchingWorld();
+        if (string.IsNullOrWhiteSpace(_config.WorldName) || !Directory.Exists(_config.WorldsFolder))
+            return;
+        try
+        {
+            _worldWatcher = new FileSystemWatcher(_config.WorldsFolder, _config.WorldName + ".db")
+            {
+                NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName,
+                SynchronizingObject = this, // raise events on the UI thread, like the timers
+                EnableRaisingEvents = true,
+            };
+            _worldWatcher.Changed += OnWorldWritten;
+            _worldWatcher.Created += OnWorldWritten;
+            _worldWatcher.Renamed += OnWorldWritten;
+        }
+        catch (Exception ex)
+        {
+            // Not fatal: _tmrAutoSave still catches saves, just on its slower cadence.
+            Log($"Couldn't watch the worlds folder ({ex.Message}); auto-save will use the timer instead.");
+        }
+    }
+
+    private void StopWatchingWorld()
+    {
+        _worldWatcher?.Dispose();
+        _worldWatcher = null;
+    }
+
+    private void OnWorldWritten(object? sender, FileSystemEventArgs e)
+    {
+        if (_token is null || !_config.AutoSaveWhileHosting) return;
+        // Debounce: the game writes the .db then shuffles the .old files around, so several events
+        // arrive per save. Restarting the settle timer collapses them into one upload.
+        _tmrSaveSettle.Stop();
+        _tmrSaveSettle.Start();
     }
 
     private async Task AutoSaveAsync()
@@ -392,14 +480,20 @@ public sealed partial class MainForm : Form
         if (!IsValheimRunning()) return; // only autosave mid-session
         if (!WorldFiles.ExistingFiles(_config.WorldsFolder, _config.WorldName).Any()) return;
 
+        // Nothing new on disk since our last upload: don't spend CPU, disk reads and upstream
+        // bandwidth (which the game is sharing with the players) re-sending identical bytes.
+        var fingerprint = WorldFiles.Fingerprint(_config.WorldsFolder, _config.WorldName);
+        if (fingerprint == _lastUploadedFingerprint) return;
+
         SetBusy(true);
         try
         {
-            var zip = WorldFiles.CreateZip(_config.WorldsFolder, _config.WorldName);
+            var zip = await ZipInBackgroundAsync(CompressionLevel.Fastest);
             try
             {
                 var newVersion = await _client!.UploadAsync(_token, zip, finish: false, _baseVersion);
                 _baseVersion = newVersion;
+                _lastUploadedFingerprint = fingerprint;
                 Log($"Auto-saved (v{newVersion}).");
             }
             finally { try { File.Delete(zip); } catch { } }
@@ -407,6 +501,19 @@ public sealed partial class MainForm : Form
         catch (Exception ex) { Log($"Auto-save skipped: {ex.Message}"); }
         finally { SetBusy(false); }
     }
+
+    // Zipping a 30 MB world is a second or more of CPU plus a burst of disk reads. Do it off the UI
+    // thread at below-normal priority so neither this window nor the game we're sharing the machine
+    // with waits behind it.
+    private Task<string> ZipInBackgroundAsync(CompressionLevel compression) =>
+        Task.Run(() =>
+        {
+            var thread = Thread.CurrentThread;
+            var previous = thread.Priority;
+            thread.Priority = ThreadPriority.BelowNormal;
+            try { return WorldFiles.CreateZip(_config.WorldsFolder, _config.WorldName, compression); }
+            finally { thread.Priority = previous; }
+        });
 
     private async Task ShareJoinCodeAsync()
     {
@@ -436,7 +543,8 @@ public sealed partial class MainForm : Form
         catch (CoordinatorException ex)
         {
             Log($"Lost the lock: {ex.Message}");
-            _token = null; _tmrHeartbeat.Stop(); _tmrAutoSave.Stop();
+            _token = null; _tmrHeartbeat.Stop(); _tmrAutoSave.Stop(); _tmrSaveSettle.Stop();
+            StopWatchingWorld();
             await RefreshStateAsync();
         }
         catch { /* transient network blip; try again next tick */ }
@@ -467,7 +575,8 @@ public sealed partial class MainForm : Form
             // We thought we were hosting but the server shows the world free → our lease was lost.
             if (_token is not null && !state.Locked)
             {
-                _token = null; _tmrHeartbeat.Stop(); _tmrAutoSave.Stop();
+                _token = null; _tmrHeartbeat.Stop(); _tmrAutoSave.Stop(); _tmrSaveSettle.Stop();
+                StopWatchingWorld();
                 Log("Your hosting lock expired or was released.");
             }
             var amHost = _token is not null && state.Locked;
@@ -584,6 +693,12 @@ public sealed partial class MainForm : Form
         _tmrState.Stop();
         FormClosing -= OnClosing;
         Close();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) StopWatchingWorld(); // not owned by the form's component container
+        base.Dispose(disposing);
     }
 
     // ---- Helpers ----
