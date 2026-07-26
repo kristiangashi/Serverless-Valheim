@@ -8,6 +8,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>ValheimWorldKeeper</AssemblyName>
     <Version>1.0.0</Version>
+    <!-- Friends run this on everything from laptops to 4K TVs; scale per-monitor so the window
+         re-lays-out when it moves to a display with a different scale factor. -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <!-- Friends double-click one file; bundle the runtime so no .NET install is needed.
          See README for the publish command that produces the single-file self-contained exe. -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>

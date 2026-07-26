@@ -19,6 +19,7 @@ public sealed partial class MainForm : Form
 
     private readonly AppConfig _config;
     private CoordinatorClient? _client;
+    private TableLayoutPanel _root = null!; // built in BuildUi, before anything reads it
 
     private string? _token;        // non-null while we hold the lock (i.e. we are hosting)
     private int _baseVersion;      // version to send as baseVersion on the next upload
@@ -34,22 +35,32 @@ public sealed partial class MainForm : Form
     private readonly TextBox _txtUrl = NewText();
     private readonly CheckBox _chkAutoSave = new() { Text = "Auto-save every 10 min while hosting", AutoSize = true };
     private readonly CheckBox _chkAutoLaunch = new() { Text = "Launch Valheim automatically when the world is ready", AutoSize = true };
-    private readonly Button _btnSaveSettings = new() { Text = "Save settings", AutoSize = true };
+    private readonly Button _btnSaveSettings = NewButton("Save settings");
 
-    private readonly Label _lblStatus = new() { AutoSize = false, Height = 32, Font = new Font("Segoe UI", 13, FontStyle.Bold), Dock = DockStyle.Top };
-    private readonly Label _lblDetail = new() { AutoSize = false, Height = 20, ForeColor = Color.DimGray, Dock = DockStyle.Top };
+    private readonly Label _lblStatus = new()
+    {
+        AutoSize = true, Dock = DockStyle.Fill, Font = new Font("Segoe UI", 13, FontStyle.Bold),
+        Margin = new Padding(3, 10, 3, 0),
+    };
+    private readonly Label _lblDetail = new()
+    {
+        AutoSize = true, Dock = DockStyle.Fill, ForeColor = Color.DimGray, Margin = new Padding(3, 2, 3, 8),
+    };
 
-    private readonly Panel _joinerPanel = new() { Width = 430, Height = 30 };
-    private readonly Label _lblJoinCode = new() { AutoSize = true, Font = new Font("Segoe UI", 11, FontStyle.Bold), Location = new Point(0, 4) };
-    private readonly Button _btnCopyCode = new() { Text = "Copy", AutoSize = true, Location = new Point(220, 0) };
+    private readonly FlowLayoutPanel _joinerPanel = NewStrip();
+    private readonly Label _lblJoinCode = new()
+    {
+        AutoSize = true, Font = new Font("Segoe UI", 11, FontStyle.Bold), Margin = new Padding(0, 6, 12, 3),
+    };
+    private readonly Button _btnCopyCode = NewButton("Copy");
 
-    private readonly Panel _hostCodePanel = new() { Width = 430, Height = 32 };
-    private readonly TextBox _txtJoinCode = new() { Width = 140, Location = new Point(0, 2), PlaceholderText = "join code" };
-    private readonly Button _btnShareCode = new() { Text = "Share join code", AutoSize = true, Location = new Point(150, 0) };
+    private readonly FlowLayoutPanel _hostCodePanel = NewStrip();
+    private readonly TextBox _txtJoinCode = new() { PlaceholderText = "join code", Margin = new Padding(0, 5, 8, 3) };
+    private readonly Button _btnShareCode = NewButton("Share join code");
 
-    private readonly Button _btnHost = new() { Text = "Host this world", Width = 140, Height = 36 };
-    private readonly Button _btnLaunch = new() { Text = "Launch Valheim", Width = 130, Height = 36 };
-    private readonly Button _btnStop = new() { Text = "Stop hosting (save & release)", Width = 220, Height = 36 };
+    private readonly Button _btnHost = NewButton("Host this world");
+    private readonly Button _btnLaunch = NewButton("Launch Valheim");
+    private readonly Button _btnStop = NewButton("Stop hosting (save & release)");
 
     private readonly TextBox _txtLog = new()
     {
@@ -67,12 +78,12 @@ public sealed partial class MainForm : Form
     {
         _config = AppConfig.Load();
         Text = "Valheim World Keeper";
-        Width = 480;
-        Height = 700;
         StartPosition = FormStartPosition.CenterScreen;
+        AutoScaleMode = AutoScaleMode.Font;
         Font = new Font("Segoe UI", 9);
 
         BuildUi();
+        SizeToScreen();
         LoadConfigIntoUi();
         RebuildClient();
 
@@ -99,71 +110,149 @@ public sealed partial class MainForm : Form
     // ---- UI construction ----
 
     private static TextBox NewText(bool password = false) =>
-        new() { Width = 280, UseSystemPasswordChar = password };
+        new() { UseSystemPasswordChar = password };
 
+    // Buttons size themselves from their own text, so a larger system font or display scale grows
+    // them instead of clipping the caption.
+    private static Button NewButton(string text) => new()
+    {
+        Text = text, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        Padding = new Padding(12, 6, 12, 6), Margin = new Padding(0, 0, 8, 8),
+    };
+
+    // A row of controls that wraps to the next line when the window is too narrow for it.
+    private static FlowLayoutPanel NewStrip() => new()
+    {
+        AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = true,
+        FlowDirection = FlowDirection.LeftToRight, Margin = new Padding(0),
+    };
+
+    // The whole form is built from AutoSize rows inside one scrollable table: no hard-coded panel
+    // heights, so nothing can be clipped out of view at a larger display scale or system font size
+    // (which is how the "Save settings" button used to disappear), and expanding the window hands
+    // the extra space to the activity log rather than leaving dead space.
     private void BuildUi()
     {
-        var root = new FlowLayoutPanel
+        _root = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown,
-            WrapContents = false, AutoScroll = true, Padding = new Padding(12),
+            Dock = DockStyle.Fill, ColumnCount = 1, AutoScroll = true, Padding = new Padding(12),
         };
+        var root = _root;
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        var settings = new GroupBox { Text = "Settings", Width = 430, Height = 290 };
-        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(8) };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        void AddRow(Control c, SizeType sizeType = SizeType.AutoSize, float size = 0f)
+        {
+            root.RowStyles.Add(new RowStyle(sizeType, size));
+            c.Dock = DockStyle.Fill;
+            root.Controls.Add(c, 0, root.RowCount);
+            root.RowCount++;
+        }
+
+        var settings = new GroupBox
+        {
+            Text = "Settings", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(8, 4, 8, 8), Margin = new Padding(0, 0, 0, 4),
+            // Grows with the window, but stops before the text boxes become absurdly wide on a
+            // maximised 4K window.
+            MaximumSize = new Size(LogicalToDeviceUnits(760), 0),
+        };
+        var grid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill, ColumnCount = 2,
+            AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));   // labels: as wide as the text needs
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); // inputs: take the rest
         void Row(string label, Control input)
         {
-            grid.RowCount++;
-            grid.Controls.Add(new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 7, 3, 3) });
+            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            grid.Controls.Add(
+                new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 7, 10, 3) },
+                0, grid.RowCount);
             input.Dock = DockStyle.Fill;
-            grid.Controls.Add(input);
+            input.Margin = new Padding(3, 4, 3, 4);
+            grid.Controls.Add(input, 1, grid.RowCount);
+            grid.RowCount++;
+        }
+        void SpanRow(Control c)
+        {
+            grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            grid.Controls.Add(c, 0, grid.RowCount);
+            grid.SetColumnSpan(c, 2);
+            grid.RowCount++;
         }
         Row("Your name", _txtName);
         Row("Group passphrase", _txtPassphrase);
         Row("World name", _txtWorld);
         Row("Worlds folder", _txtWorldsFolder);
         Row("Coordinator URL", _txtUrl);
-        grid.RowCount++;
-        grid.Controls.Add(_chkAutoSave);
-        grid.SetColumnSpan(_chkAutoSave, 2);
-        grid.RowCount++;
-        grid.Controls.Add(_chkAutoLaunch);
-        grid.SetColumnSpan(_chkAutoLaunch, 2);
-        grid.RowCount++;
-        grid.Controls.Add(_btnSaveSettings);
+        _chkAutoSave.Margin = new Padding(3, 8, 3, 2);
+        _chkAutoLaunch.Margin = new Padding(3, 2, 3, 2);
+        _btnSaveSettings.Anchor = AnchorStyles.Left;
+        _btnSaveSettings.Margin = new Padding(3, 10, 3, 3);
+        SpanRow(_chkAutoSave);
+        SpanRow(_chkAutoLaunch);
+        SpanRow(_btnSaveSettings);
         settings.Controls.Add(grid);
 
+        _txtJoinCode.Width = LogicalToDeviceUnits(140);
         _joinerPanel.Controls.Add(_lblJoinCode);
         _joinerPanel.Controls.Add(_btnCopyCode);
         _hostCodePanel.Controls.Add(_txtJoinCode);
         _hostCodePanel.Controls.Add(_btnShareCode);
 
-        var statusPanel = new Panel { Width = 430, Height = 56 };
-        statusPanel.Controls.Add(_lblDetail);
-        statusPanel.Controls.Add(_lblStatus);
+        var actions = NewStrip();
+        actions.Margin = new Padding(0, 6, 0, 4);
+        actions.Controls.Add(_btnHost);
+        actions.Controls.Add(_btnLaunch);
+        actions.Controls.Add(_btnStop);
 
-        var buttons = new FlowLayoutPanel { Width = 430, Height = 48, FlowDirection = FlowDirection.LeftToRight, WrapContents = true };
-        buttons.Controls.Add(_btnHost);
-        buttons.Controls.Add(_btnLaunch);
-        var buttons2 = new FlowLayoutPanel { Width = 430, Height = 48, FlowDirection = FlowDirection.LeftToRight };
-        buttons2.Controls.Add(_btnStop);
+        var logLabel = new Label { Text = "Activity", AutoSize = true, Margin = new Padding(3, 4, 3, 2) };
+        _txtLog.MinimumSize = new Size(0, LogicalToDeviceUnits(80));
 
-        var logLabel = new Label { Text = "Activity", AutoSize = true, Margin = new Padding(3, 6, 3, 0) };
-        var logHost = new Panel { Width = 430, Height = 150 };
-        logHost.Controls.Add(_txtLog);
-
-        root.Controls.Add(settings);
-        root.Controls.Add(statusPanel);
-        root.Controls.Add(_joinerPanel);
-        root.Controls.Add(_hostCodePanel);
-        root.Controls.Add(buttons);
-        root.Controls.Add(buttons2);
-        root.Controls.Add(logLabel);
-        root.Controls.Add(logHost);
+        AddRow(settings);
+        AddRow(_lblStatus);
+        AddRow(_lblDetail);
+        AddRow(_joinerPanel);
+        AddRow(_hostCodePanel);
+        AddRow(actions);
+        AddRow(logLabel);
+        AddRow(_txtLog, SizeType.Percent, 100f); // soaks up whatever height is left
         Controls.Add(root);
     }
+
+    // Open at a comfortable size that still fits the monitor the window lands on.
+    private void SizeToScreen()
+    {
+        var wanted = LogicalToDeviceUnits(new Size(540, 760));
+        var work = WorkingArea();
+        ClientSize = new Size(
+            Math.Min(wanted.Width, work.Width - LogicalToDeviceUnits(80)),
+            Math.Min(wanted.Height, work.Height - LogicalToDeviceUnits(80)));
+    }
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        ApplyMinimumSize();
+    }
+
+    // The window must not be resizable small enough to hide a control, so the floor is measured
+    // from the laid-out content at the narrowest width we support — it grows by itself with the
+    // display scale and the system font size instead of being a hard-coded guess. Capped to the
+    // monitor so the window always fits on screen; if the content genuinely can't fit, the activity
+    // log (the last row, and the only one that can shrink) gives up space first.
+    private void ApplyMinimumSize()
+    {
+        var narrow = LogicalToDeviceUnits(430);
+        var needed = SizeFromClientSize(new Size(narrow, _root.GetPreferredSize(new Size(narrow, 0)).Height));
+        var work = WorkingArea();
+        MinimumSize = new Size(Math.Min(needed.Width, work.Width), Math.Min(needed.Height, work.Height));
+    }
+
+    private Rectangle WorkingArea() =>
+        (IsHandleCreated ? Screen.FromControl(this) : Screen.FromPoint(Cursor.Position))?.WorkingArea
+        ?? Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1024, 768);
 
     private void LoadConfigIntoUi()
     {
@@ -410,9 +499,13 @@ public sealed partial class MainForm : Form
 
             // Joiner sees the code; host gets the field to share one.
             var showJoiner = !amHost && state.Locked && !string.IsNullOrEmpty(state.JoinCode);
+            var wasShowing = (_joinerPanel.Visible, _hostCodePanel.Visible);
             _joinerPanel.Visible = showJoiner;
             if (showJoiner) { _lblJoinCode.Text = $"Join code: {state.JoinCode}"; _lblJoinCode.Tag = state.JoinCode; }
             _hostCodePanel.Visible = amHost;
+            // These rows appear after the window's minimum height was measured, so re-measure —
+            // otherwise a small window would squeeze them out of the activity log's space.
+            if (wasShowing != (showJoiner, amHost)) ApplyMinimumSize();
 
             UpdateButtons(state);
         }
