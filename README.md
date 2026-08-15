@@ -115,9 +115,28 @@ Then open the printed `http://localhost:<port>`. Default group passphrase is `va
 | `R2_ACCESS_KEY_ID` | — | R2 API token Access Key ID. |
 | `R2_SECRET_ACCESS_KEY` | — | R2 API token Secret Access Key. |
 | `R2_BUCKET` | — | R2 bucket name. |
+| `R2_KEY_PREFIX` | (none) | Namespace within the bucket, e.g. `staging/`. Lets a second coordinator share one bucket without being able to see the live world's keys. Leave unset in production. |
 
 When all four `R2_*` vars are set, world archives are stored in **Cloudflare R2** (durable).
 Otherwise the coordinator falls back to local disk. The startup log prints which store is active.
+
+### World transfers go straight to R2
+
+The world archive is by far the largest thing this app moves, and it's re-sent on every in-game
+save. When storage is R2, the coordinator never carries those bytes: it hands the client a
+presigned URL and the client talks to R2 directly, so only small JSON crosses the coordinator.
+This matters because most free hosting tiers meter outbound bandwidth, and proxying a ~20 MB
+archive on every save exhausts a small allowance quickly.
+
+An upload lands on a staging key first (`pending/…`) and only becomes the world when the client
+confirms it, at which point the coordinator promotes it with a server-side copy inside R2. That
+ordering is deliberate: the boot-time scan treats any `world-v*` object as real world data, so an
+upload abandoned midway must never be sitting at a version key. Stale staged uploads are swept
+after an hour.
+
+Local-disk storage can't issue URLs, so it returns `501` from the URL endpoints and both clients
+fall back to streaming through the coordinator (`/api/upload`, `/api/download`). Older helpers that
+don't know the new endpoints get a `404` and take the same fallback.
 
 ## Deploy to Railway
 

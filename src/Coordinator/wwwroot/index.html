@@ -250,8 +250,19 @@ $('copyJoin').addEventListener('click', () => {
   navigator.clipboard.writeText($('joinCode').textContent).then(() => toast('Join code copied'));
 });
 
-$('downloadBtn').addEventListener('click', () => {
-  window.location = '/api/download?passphrase=' + encodeURIComponent($('pass').value);
+// Prefer a URL straight to storage so the world bytes never cross the coordinator; fall back to
+// streaming through it when storage can't presign (404/501), same as the desktop helper does.
+$('downloadBtn').addEventListener('click', async () => {
+  const q = '?passphrase=' + encodeURIComponent($('pass').value);
+  try {
+    const res = await fetch('/api/download-url' + q);
+    if (res.ok) { window.location = (await res.json()).url; return; }
+    if (res.status !== 404 && res.status !== 501) {
+      toast((await res.json().catch(() => null))?.error || 'Download failed', true);
+      return;
+    }
+  } catch { /* offline — let the direct link surface it */ }
+  window.location = '/api/download' + q;
 });
 
 $('setJoinBtn').addEventListener('click', async () => {
@@ -267,17 +278,43 @@ $('setJoinBtn').addEventListener('click', async () => {
   } catch (e) { toast(e.message, true); }
 });
 
-async function upload(finish) {
-  const f = $('worldFile').files[0];
-  if (!f) { toast('Pick your zipped world file first', true); return; }
+// PUT straight to storage when the coordinator can sign for it, otherwise POST through the
+// coordinator. Either way the version only moves once the bytes have landed.
+async function uploadDirect(file, finish) {
+  const res = await fetch('/api/upload-url', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: LS.token, baseVersion: lastVersion }),
+  });
+  if (res.status === 404 || res.status === 501) return null;
+  const slot = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(slot?.error || ('Request failed (' + res.status + ')'));
+
+  const put = await fetch(slot.url, {
+    method: 'PUT', headers: { 'Content-Type': slot.contentType }, body: file,
+  });
+  if (!put.ok) throw new Error('Storage rejected the upload (' + put.status + ')');
+
+  return api('/api/upload-complete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: LS.token, uploadId: slot.uploadId, version: slot.version, finish }),
+  });
+}
+
+async function uploadProxied(file, finish) {
   const fd = new FormData();
   fd.append('token', LS.token);
   fd.append('finish', finish ? 'true' : 'false');
   fd.append('baseVersion', String(lastVersion));
-  fd.append('file', f);
+  fd.append('file', file);
+  return api('/api/upload', { method: 'POST', body: fd });
+}
+
+async function upload(finish) {
+  const f = $('worldFile').files[0];
+  if (!f) { toast('Pick your zipped world file first', true); return; }
   toast(finish ? 'Uploading & finishing…' : 'Saving…');
   try {
-    const r = await api('/api/upload', { method: 'POST', body: fd });
+    const r = await uploadDirect(f, finish) || await uploadProxied(f, finish);
     if (finish) { LS.token = ''; toast('Saved as v' + r.version + ' — world freed'); }
     else toast('Autosaved as v' + r.version);
     refresh();

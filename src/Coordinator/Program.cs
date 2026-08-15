@@ -31,17 +31,23 @@ var r2Account = Cfg("R2_ACCOUNT_ID", "");
 var r2Key = Cfg("R2_ACCESS_KEY_ID", "");
 var r2Secret = Cfg("R2_SECRET_ACCESS_KEY", "");
 var r2Bucket = Cfg("R2_BUCKET", "");
+// Optional namespace inside the bucket. Empty (production) means the bucket root; setting it lets a
+// second coordinator — a staging deploy, or a test run — share the bucket without being able to
+// reach the live world's keys at all.
+var r2Prefix = Cfg("R2_KEY_PREFIX", "");
 var r2Configured = new[] { r2Account, r2Key, r2Secret, r2Bucket }.All(v => v.Length > 0);
 
 IBlobStorage blobs = r2Configured
-    ? new R2BlobStorage(r2Account, r2Key, r2Secret, r2Bucket)
+    ? new R2BlobStorage(r2Account, r2Key, r2Secret, r2Bucket, r2Prefix)
     : new LocalDiskBlobStorage(Path.Combine(dataDir, "worlds"));
 
 var store = new WorldStore(blobs, dataDir, TimeSpan.FromMinutes(leaseMinutes), keepVersions);
 builder.Services.AddSingleton(store);
 
 var bootLogger = LoggerFactory.Create(b => b.AddConsole()).CreateLogger("Startup");
-bootLogger.LogInformation("World storage: {Storage}", r2Configured ? $"Cloudflare R2 (bucket '{r2Bucket}')" : "local disk");
+bootLogger.LogInformation("World storage: {Storage}", r2Configured
+    ? $"Cloudflare R2 (bucket '{r2Bucket}'{(r2Prefix.Length > 0 ? $", prefix '{r2Prefix}'" : "")})"
+    : "local disk");
 
 var app = builder.Build();
 
@@ -112,6 +118,66 @@ app.MapPost("/api/admin/keep-versions", (KeepRequest req, WorldStore s) =>
     return Results.Ok(new { keepVersions = s.SetKeepVersions(req.Keep) });
 });
 
+// --- Direct-to-storage transfers ---
+// The world archive is ~20 MB and is re-sent on every in-game save, which dwarfs everything else
+// this API moves. Handing the client a presigned URL keeps those bytes between it and R2, so the
+// coordinator's own bandwidth budget only ever carries JSON. /api/upload and /api/download below
+// stay as the fallback path: local-disk storage can't presign, and older helpers don't ask.
+//
+// A 20 MB transfer on a slow home uplink is minutes, and the lease is only 5 — so the URL has to
+// outlive the lease. That's safe: it grants access to one staging key that nothing reads until
+// /api/upload-complete re-checks the lock, so a URL outliving its lease can't overwrite the world.
+var presignLifetime = TimeSpan.FromMinutes(30);
+
+app.MapPost("/api/upload-url", async (UploadUrlRequest req, WorldStore s, CancellationToken ct) =>
+{
+    if (blobs is not IPresignedBlobStorage p)
+        return Results.Json(new { error = "This coordinator's storage can't issue direct upload URLs." }, statusCode: 501);
+
+    var (begin, nextVersion) = s.BeginUpload(req.Token, req.BaseVersion);
+    if (begin != OpResult.Ok) return Map(begin, "uploading");
+
+    var uploadId = Guid.NewGuid().ToString("N");
+    var url = await p.PresignPutAsync(uploadId, presignLifetime, ct);
+    return Results.Ok(new { version = nextVersion, uploadId, url, contentType = p.PutContentType });
+});
+
+// Called once the client's PUT lands. The staged object only becomes the world here: re-check the
+// lock first so a client whose lease expired mid-upload can't overwrite whoever holds it now, then
+// promote and bump the version. The gap between promote and commit is the same one /api/upload has
+// always had, and is milliseconds — the copy happens inside R2.
+app.MapPost("/api/upload-complete", async (UploadCompleteRequest req, WorldStore s, CancellationToken ct) =>
+{
+    if (blobs is not IPresignedBlobStorage p)
+        return Results.Json(new { error = "This coordinator's storage can't accept direct uploads." }, statusCode: 501);
+
+    var (check, expected) = s.BeginUpload(req.Token, req.Version - 1);
+    if (check != OpResult.Ok) return Map(check, "uploading");
+    if (expected != req.Version) return Map(OpResult.BadVersion, "uploading");
+
+    try { await p.PromoteAsync(req.UploadId, req.Version, ct); }
+    catch (InvalidOperationException e) { return Results.Conflict(new { error = e.Message }); }
+
+    var commit = s.CommitUpload(req.Token, req.Version, req.Finish);
+    if (commit != OpResult.Ok) return Map(commit, "uploading");
+
+    await s.PruneBlobsAsync(ct);
+    return Results.Ok(new { version = req.Version, released = req.Finish });
+});
+
+app.MapGet("/api/download-url", async (string? passphrase, WorldStore s, CancellationToken ct) =>
+{
+    if (!GroupOk(passphrase)) return Results.Json(new { error = "Wrong group passphrase." }, statusCode: 401);
+    if (blobs is not IPresignedBlobStorage p)
+        return Results.Json(new { error = "This coordinator's storage can't issue direct download URLs." }, statusCode: 501);
+
+    var state = s.GetPublicState();
+    if (!state.HasWorld) return Results.NotFound(new { error = "No world has been uploaded yet." });
+
+    var url = await p.PresignGetAsync(state.Version, presignLifetime, ct);
+    return Results.Ok(new { version = state.Version, url });
+});
+
 app.MapPost("/api/upload", async (HttpRequest http, WorldStore s, CancellationToken ct) =>
 {
     if (!http.HasFormContentType) return Results.BadRequest(new { error = "Expected multipart form upload." });
@@ -157,3 +223,5 @@ record TokenRequest(string Token);
 record JoinCodeRequest(string Token, string JoinCode);
 record AdminRequest(string AdminPassphrase);
 record KeepRequest(string AdminPassphrase, int Keep);
+record UploadUrlRequest(string Token, int? BaseVersion);
+record UploadCompleteRequest(string Token, string UploadId, int Version, bool Finish);
