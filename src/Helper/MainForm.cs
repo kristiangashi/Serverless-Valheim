@@ -18,6 +18,13 @@ public sealed partial class MainForm : Form
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ShutdownBlockReasonDestroy(IntPtr hWnd);
 
+    // Ask the desktop manager for a dark title bar, so the frame doesn't sit as a bright band above
+    // a dark window. Windows 10 1809+ / 11; older builds just return an error, which we ignore.
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+    private const int DwmUseImmersiveDarkMode = 20;
+
     private readonly AppConfig _config;
     private CoordinatorClient? _client;
     private TableLayoutPanel _root = null!; // built in BuildUi, before anything reads it
@@ -34,23 +41,31 @@ public sealed partial class MainForm : Form
     private readonly TextBox _txtWorld = NewText();
     private readonly TextBox _txtWorldsFolder = NewText();
     private readonly TextBox _txtUrl = NewText();
-    private readonly CheckBox _chkAutoSave = new() { Text = "Auto-save while hosting, and at most every", AutoSize = true };
+    private readonly CheckBox _chkAutoSave = new RunicCheckBox { Text = "Auto-save while hosting, and at most every" };
     private readonly NumericUpDown _numAutoSaveMinutes = new()
     {
         Minimum = AppConfig.MinAutoSaveMinutes, Maximum = AppConfig.MaxAutoSaveMinutes, Value = 10,
     };
     private readonly Label _lblAutoSaveUnit = new() { Text = "min", AutoSize = true };
-    private readonly CheckBox _chkAutoLaunch = new() { Text = "Launch Valheim automatically when the world is ready", AutoSize = true };
+    private readonly CheckBox _chkAutoLaunch = new RunicCheckBox { Text = "Launch Valheim automatically when the world is ready" };
     private readonly Button _btnSaveSettings = NewButton("Save settings");
+
+    private readonly PictureBox _logo = new()
+    {
+        SizeMode = PictureBoxSizeMode.Zoom, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 4),
+    };
 
     private readonly Label _lblStatus = new()
     {
-        AutoSize = true, Dock = DockStyle.Fill, Font = new Font("Segoe UI", 13, FontStyle.Bold),
+        AutoSize = true, Dock = DockStyle.Fill, Font = Theme.Display(13, FontStyle.Bold),
         Margin = new Padding(3, 10, 3, 0),
+        // Says what the window is doing during the gap before the first reply, when the action
+        // buttons are deliberately hidden. A cold-starting coordinator can take most of a minute.
+        Text = "Contacting the coordinator…", ForeColor = Theme.Muted,
     };
     private readonly Label _lblDetail = new()
     {
-        AutoSize = true, Dock = DockStyle.Fill, ForeColor = Color.DimGray, Margin = new Padding(3, 2, 3, 8),
+        AutoSize = true, Dock = DockStyle.Fill, ForeColor = Theme.Muted, Margin = new Padding(3, 2, 3, 8),
     };
 
     private readonly FlowLayoutPanel _joinerPanel = NewStrip();
@@ -71,9 +86,18 @@ public sealed partial class MainForm : Form
     private readonly TextBox _txtLog = new()
     {
         Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical,
-        Dock = DockStyle.Fill, BackColor = Color.FromArgb(30, 24, 18), ForeColor = Color.Gainsboro,
-        Font = new Font("Consolas", 9),
+        Dock = DockStyle.Fill, BackColor = Theme.Sunken, ForeColor = Theme.Muted,
+        Font = new Font("Consolas", 9), BorderStyle = BorderStyle.FixedSingle,
     };
+
+    // The row holding Host / Launch / Stop. Hidden outright until the coordinator has told us who
+    // holds the world — see UpdateButtons.
+    private FlowLayoutPanel _actions = null!;
+
+    // Last state the coordinator actually confirmed, or null if we've never had a successful reply
+    // or the most recent one failed. UpdateButtons falls back to this so callers that don't have a
+    // state to hand (SetBusy, for instance) don't read as "we know nothing".
+    private CoordinatorState? _lastState;
 
     // How often to ask the coordinator for state. This is the only thing here that runs whether or
     // not anyone is playing, so its cadence sets the app's idle cost: a window left open all month
@@ -107,12 +131,22 @@ public sealed partial class MainForm : Form
         Text = "Valheim World Keeper";
         StartPosition = FormStartPosition.CenterScreen;
         AutoScaleMode = AutoScaleMode.Font;
+        // Deliberately the system UI font: AutoScaleMode.Font measures the layout against it, so
+        // swapping it wholesale for the display face would rescale every panel. The display face is
+        // applied per-control instead (see Theme).
         Font = new Font("Segoe UI", 9);
+        BackColor = Theme.Night;
+        ForeColor = Theme.Parchment;
+        Icon = Theme.LoadIcon() ?? Icon;
 
         BuildUi();
         SizeToScreen();
         LoadConfigIntoUi();
         RebuildClient();
+        // Apply the "we don't know anything yet" state before the window is ever painted. Without
+        // this the action buttons keep the default Visible=true they were constructed with, and the
+        // very gap this is meant to cover — startup, before the first reply — would show them.
+        UpdateButtons();
 
         _btnSaveSettings.Click += (_, _) => SaveSettings();
         _btnHost.Click += async (_, _) => await HostAsync();
@@ -159,11 +193,13 @@ public sealed partial class MainForm : Form
         new() { UseSystemPasswordChar = password };
 
     // Buttons size themselves from their own text, so a larger system font or display scale grows
-    // them instead of clipping the caption.
+    // them instead of clipping the caption. Mnemonics are off because no button here defines an
+    // accelerator, and leaving them on silently ate the ampersand in "Stop hosting (save & release)".
     private static Button NewButton(string text) => new()
     {
         Text = text, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
         Padding = new Padding(12, 6, 12, 6), Margin = new Padding(0, 0, 8, 8),
+        UseMnemonic = false,
     };
 
     // A row of controls that wraps to the next line when the window is too narrow for it.
@@ -194,7 +230,7 @@ public sealed partial class MainForm : Form
             root.RowCount++;
         }
 
-        var settings = new GroupBox
+        var settings = new RunicGroupBox
         {
             Text = "Settings", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Padding = new Padding(8, 4, 8, 8), Margin = new Padding(0, 0, 0, 4),
@@ -213,11 +249,19 @@ public sealed partial class MainForm : Form
         {
             grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
             grid.Controls.Add(
-                new Label { Text = label, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 7, 10, 3) },
+                new Label
+                {
+                    Text = label, AutoSize = true, Anchor = AnchorStyles.Left,
+                    Margin = new Padding(3, 9, 10, 3),
+                    // Set outright rather than inherited: these sit inside the group box, whose
+                    // ForeColor is the ember accent, and a form of orange labels is a lot of orange.
+                    ForeColor = Theme.Parchment,
+                },
                 0, grid.RowCount);
-            input.Dock = DockStyle.Fill;
-            input.Margin = new Padding(3, 4, 3, 4);
-            grid.Controls.Add(input, 1, grid.RowCount);
+            var field = Theme.Framed(input);
+            field.Dock = DockStyle.Fill;
+            field.Margin = new Padding(3, 4, 3, 4);
+            grid.Controls.Add(field, 1, grid.RowCount);
             grid.RowCount++;
         }
         void SpanRow(Control c)
@@ -236,12 +280,13 @@ public sealed partial class MainForm : Form
         // the three controls on one wrapping line.
         var autoSaveStrip = NewStrip();
         autoSaveStrip.Margin = new Padding(0, 8, 0, 2);
-        _chkAutoSave.Margin = new Padding(3, 5, 3, 2);
-        _numAutoSaveMinutes.Width = LogicalToDeviceUnits(52);
-        _numAutoSaveMinutes.Margin = new Padding(3, 2, 3, 2);
-        _lblAutoSaveUnit.Margin = new Padding(0, 5, 3, 2);
+        _chkAutoSave.Margin = new Padding(3, 6, 3, 2);
+        var minutesField = Theme.Framed(_numAutoSaveMinutes, LogicalToDeviceUnits(44));
+        minutesField.Margin = new Padding(3, 2, 3, 2);
+        _lblAutoSaveUnit.Margin = new Padding(0, 6, 3, 2);
+        _lblAutoSaveUnit.ForeColor = Theme.Parchment;
         autoSaveStrip.Controls.Add(_chkAutoSave);
-        autoSaveStrip.Controls.Add(_numAutoSaveMinutes);
+        autoSaveStrip.Controls.Add(minutesField);
         autoSaveStrip.Controls.Add(_lblAutoSaveUnit);
 
         _chkAutoLaunch.Margin = new Padding(3, 2, 3, 2);
@@ -252,30 +297,44 @@ public sealed partial class MainForm : Form
         SpanRow(_btnSaveSettings);
         settings.Controls.Add(grid);
 
-        _txtJoinCode.Width = LogicalToDeviceUnits(140);
         _joinerPanel.Controls.Add(_lblJoinCode);
         _joinerPanel.Controls.Add(_btnCopyCode);
-        _hostCodePanel.Controls.Add(_txtJoinCode);
+        var joinCodeField = Theme.Framed(_txtJoinCode, LogicalToDeviceUnits(132));
+        joinCodeField.Margin = new Padding(0, 4, 8, 3);
+        _hostCodePanel.Controls.Add(joinCodeField);
         _hostCodePanel.Controls.Add(_btnShareCode);
 
-        var actions = NewStrip();
-        actions.Margin = new Padding(0, 6, 0, 4);
-        actions.Controls.Add(_btnHost);
-        actions.Controls.Add(_btnLaunch);
-        actions.Controls.Add(_btnStop);
+        _actions = NewStrip();
+        _actions.Margin = new Padding(0, 6, 0, 4);
+        _actions.Controls.Add(_btnHost);
+        _actions.Controls.Add(_btnLaunch);
+        _actions.Controls.Add(_btnStop);
 
-        var logLabel = new Label { Text = "Activity", AutoSize = true, Margin = new Padding(3, 4, 3, 2) };
+        var logLabel = new Label
+        {
+            Text = "Activity", AutoSize = true, Margin = new Padding(3, 4, 3, 2),
+            ForeColor = Theme.Ember, Font = Theme.Display(9.5f, FontStyle.Bold),
+        };
         _txtLog.MinimumSize = new Size(0, LogicalToDeviceUnits(80));
+
+        // Fixed-height row: the row is sized by the window, and Zoom fits the artwork inside it. An
+        // AutoSize row would take the bitmap's own height instead and hand the header 512px.
+        _logo.Image = Theme.LoadLogo();
+        _logo.BackColor = Theme.Night;
+        if (_logo.Image is not null) AddRow(_logo, SizeType.Absolute, LogicalToDeviceUnits(132));
 
         AddRow(settings);
         AddRow(_lblStatus);
         AddRow(_lblDetail);
         AddRow(_joinerPanel);
         AddRow(_hostCodePanel);
-        AddRow(actions);
+        AddRow(_actions);
         AddRow(logLabel);
         AddRow(_txtLog, SizeType.Percent, 100f); // soaks up whatever height is left
         Controls.Add(root);
+
+        Theme.Apply(root);
+        Theme.MakePrimary(_btnHost);
     }
 
     // Open at a comfortable size that still fits the monitor the window lands on.
@@ -286,6 +345,17 @@ public sealed partial class MainForm : Form
         ClientSize = new Size(
             Math.Min(wanted.Width, work.Width - LogicalToDeviceUnits(80)),
             Math.Min(wanted.Height, work.Height - LogicalToDeviceUnits(80)));
+    }
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        try
+        {
+            var dark = 1;
+            DwmSetWindowAttribute(Handle, DwmUseImmersiveDarkMode, ref dark, sizeof(int));
+        }
+        catch (DllNotFoundException) { /* pre-Vista shell; the light title bar is cosmetic only */ }
     }
 
     protected override void OnLoad(EventArgs e)
@@ -640,22 +710,22 @@ public sealed partial class MainForm : Form
             if (amHost)
             {
                 _lblStatus.Text = "🎮 You are hosting";
-                _lblStatus.ForeColor = Color.SeaGreen;
+                _lblStatus.ForeColor = Theme.Gold;
             }
             else if (state.Locked)
             {
                 _lblStatus.Text = $"🔒 {state.HostName ?? "Someone"} is hosting";
-                _lblStatus.ForeColor = Color.DarkOrange;
+                _lblStatus.ForeColor = Theme.Ember;
             }
             else if (state.HasWorld)
             {
                 _lblStatus.Text = "✅ World is free — you can host";
-                _lblStatus.ForeColor = Color.SeaGreen;
+                _lblStatus.ForeColor = Theme.Moss;
             }
             else
             {
                 _lblStatus.Text = "🌱 No world yet — host to upload the first one";
-                _lblStatus.ForeColor = Color.DimGray;
+                _lblStatus.ForeColor = Theme.Muted;
             }
 
             var saved = state.LastUpdatedAt is { } when ? $"  ·  saved {when.ToLocalTime():MMM d, h:mm tt}" : "";
@@ -664,29 +734,53 @@ public sealed partial class MainForm : Form
 
             // Joiner sees the code; host gets the field to share one.
             var showJoiner = !amHost && state.Locked && !string.IsNullOrEmpty(state.JoinCode);
-            var wasShowing = (_joinerPanel.Visible, _hostCodePanel.Visible);
+            var wasShowing = (_joinerPanel.Visible, _hostCodePanel.Visible, _actions.Visible);
             _joinerPanel.Visible = showJoiner;
             if (showJoiner) { _lblJoinCode.Text = $"Join code: {state.JoinCode}"; _lblJoinCode.Tag = state.JoinCode; }
             _hostCodePanel.Visible = amHost;
+
+            _lastState = state;
+            UpdateButtons(state);
+
             // These rows appear after the window's minimum height was measured, so re-measure —
             // otherwise a small window would squeeze them out of the activity log's space.
-            if (wasShowing != (showJoiner, amHost)) ApplyMinimumSize();
-
-            UpdateButtons(state);
+            if (wasShowing != (showJoiner, amHost, _actions.Visible)) ApplyMinimumSize();
         }
         catch (Exception ex)
         {
             if (_coordinatorReachable) { _coordinatorReachable = false; Log($"Can't reach the coordinator: {ex.Message}"); }
             _lblStatus.Text = "⚠️ Coordinator unreachable";
-            _lblStatus.ForeColor = Color.Firebrick;
+            _lblStatus.ForeColor = Theme.Blood;
+            // Forget the last known state: it may be minutes old, and acting on it (offering to host
+            // a world someone else has since claimed) is exactly what we must not do.
+            _lastState = null;
             UpdateButtons();
         }
     }
 
     private void UpdateButtons(CoordinatorState? state = null)
     {
+        state ??= _lastState;
         var amHost = _token is not null;
-        _btnHost.Enabled = !_busy && _client is not null && state is { Locked: false } && !amHost;
+
+        // Hosting is only offered once the coordinator has actually told us the world is free.
+        // Until then — the seconds before the first reply, or the half-minute a cold start takes to
+        // wake the coordinator — we genuinely don't know whether someone else is already hosting,
+        // and a disabled-looking button still invites a click. So the row isn't shown at all, and
+        // the status line says what we're waiting for.
+        //
+        // Anything that acts on the lock we already hold stays available regardless: if we're
+        // hosting, Stop must work even when the coordinator has gone unreachable.
+        // Decide from the values, never by reading Visible back: a child's Visible getter reports
+        // false whenever its parent is hidden, so deriving the row's visibility from the buttons'
+        // would latch the row shut for good the first time it hid.
+        var showHost = state is not null && !amHost;
+        _actions.Visible = showHost || amHost;
+        _btnHost.Visible = showHost;
+        _btnLaunch.Visible = amHost;
+        _btnStop.Visible = amHost;
+
+        _btnHost.Enabled = !_busy && _client is not null && state is { Locked: false };
         _btnStop.Enabled = !_busy && amHost;
         // Launch/Share are disabled mid-sync (_busy): a stale world could be opened while it's
         // being overwritten by a download, and there's no code to share until hosting is settled.

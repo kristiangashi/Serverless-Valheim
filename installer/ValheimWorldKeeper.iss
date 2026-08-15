@@ -24,6 +24,10 @@ OutputBaseFilename=ValheimWorldKeeper-Setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+; The installer's own icon, and the icon shown for the entry in Apps & Features. The Start Menu and
+; desktop shortcuts below point at the exe, which carries the same icon as its Win32 resource.
+SetupIconFile=..\src\Helper\Assets\app.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 

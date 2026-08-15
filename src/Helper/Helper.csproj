@@ -15,6 +15,16 @@
          See README for the publish command that produces the single-file self-contained exe. -->
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>false</SelfContained>
+    <!-- Embedded as the exe's Win32 icon, so Explorer, the taskbar, Alt+Tab and the shortcuts the
+         installer creates all pick it up without any of them naming an icon file. -->
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Carried inside the assembly rather than shipped alongside it: the helper is published as a
+         single self-contained file, so a loose asset next to the exe wouldn't survive. -->
+    <EmbeddedResource Include="Assets\logo.png" />
+    <EmbeddedResource Include="Assets\app.ico" />
+  </ItemGroup>
 
 </Project>
