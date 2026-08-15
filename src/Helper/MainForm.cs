@@ -75,13 +75,28 @@ public sealed partial class MainForm : Form
         Font = new Font("Consolas", 9),
     };
 
-    private readonly System.Windows.Forms.Timer _tmrState = new() { Interval = 4000 };
+    // How often to ask the coordinator for state. This is the only thing here that runs whether or
+    // not anyone is playing, so its cadence sets the app's idle cost: a window left open all month
+    // at a few seconds per poll is tens of thousands of requests a day, all of it outbound traffic
+    // metered on whatever hosts the coordinator, for a status label nobody is reading. So poll
+    // quickly only while this window actually has the user's attention — see ApplyPollCadence.
+    //
+    // Slowing this down costs nothing functionally: the lease is kept alive by _tmrHeartbeat, and
+    // auto-saves are driven by _worldWatcher. State polling only drives what's on screen.
+    private const int PollFocusedMs = 5000;
+    private const int PollUnfocusedMs = 30000;
+
+    private readonly System.Windows.Forms.Timer _tmrState = new() { Interval = PollFocusedMs };
     private readonly System.Windows.Forms.Timer _tmrHeartbeat = new() { Interval = 30000 };
     private readonly System.Windows.Forms.Timer _tmrValheim = new() { Interval = 5000 };
     // Backstop only — auto-saves are normally driven by _worldWatcher below.
     private readonly System.Windows.Forms.Timer _tmrAutoSave = new();
     // Valheim writes the world in a burst; wait for it to go quiet before reading the file.
     private readonly System.Windows.Forms.Timer _tmrSaveSettle = new() { Interval = 5000 };
+
+    // Driven by the Activated/Deactivate events rather than read from the window, so the cadence
+    // never depends on focus state that's still mid-transition. Starts true: the app opens focused.
+    private bool _windowFocused = true;
 
     private FileSystemWatcher? _worldWatcher;
     private string? _lastUploadedFingerprint;
@@ -117,6 +132,21 @@ public sealed partial class MainForm : Form
 
         _tmrState.Start();
         _tmrValheim.Start();
+
+        // Re-evaluate the poll rate whenever the window's visibility or focus changes. Gaining focus
+        // also refreshes straight away, so the user never reads a label left over from the slow tier.
+        // These events are the source of truth for focus: querying ContainsFocus from inside
+        // Deactivate still reports true, because focus hasn't moved on yet when it fires.
+        Activated += (_, _) =>
+        {
+            _windowFocused = true;
+            var wasPolling = _tmrState.Enabled; // false when we're coming back from minimized
+            ApplyPollCadence();                 // that case refreshes on its own; don't do it twice
+            if (wasPolling) _ = RefreshStateAsync();
+        };
+        Deactivate += (_, _) => { _windowFocused = false; ApplyPollCadence(); };
+        SizeChanged += (_, _) => ApplyPollCadence();
+
         FormClosing += OnClosing;
 
         Log("Ready. Fill in your settings and click \"Host this world\" when you want to play.");
@@ -563,6 +593,32 @@ public sealed partial class MainForm : Form
 
     private static bool IsValheimRunning() =>
         Process.GetProcessesByName("valheim").Length > 0;
+
+    /// <summary>
+    /// Match the state-poll rate to whether anyone can see the window: paused while minimized,
+    /// brisk while focused, slow while it sits in the background. Safe to call on any window event.
+    /// </summary>
+    private void ApplyPollCadence()
+    {
+        // Minimized: there's nothing on screen to keep current, so stop asking entirely.
+        if (WindowState == FormWindowState.Minimized)
+        {
+            _tmrState.Stop();
+            return;
+        }
+
+        var interval = _windowFocused ? PollFocusedMs : PollUnfocusedMs;
+        // Assigning Interval restarts the countdown, so only touch it on a real change — a window
+        // being dragged or resized raises these events continuously, which would otherwise keep
+        // pushing the next poll further out and leave the window frozen on stale state.
+        if (_tmrState.Interval != interval) _tmrState.Interval = interval;
+
+        if (!_tmrState.Enabled)
+        {
+            _tmrState.Start();
+            _ = RefreshStateAsync(); // resuming from minimized: what's displayed predates being hidden
+        }
+    }
 
     private async Task RefreshStateAsync()
     {

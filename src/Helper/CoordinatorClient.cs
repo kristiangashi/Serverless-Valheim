@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -70,11 +71,21 @@ public sealed class CoordinatorClient(string baseUrl)
         if (!res.IsSuccessStatusCode) throw new CoordinatorException(await ErrorMessage(res));
     }
 
+    // A coordinator that can hand out storage URLs lets the world archive skip it entirely, which
+    // is the difference between its host metering every save and metering none of them. Two cases
+    // mean "it can't, proxy instead" rather than "something went wrong": 404 (coordinator predates
+    // these endpoints) and 501 (its storage is local disk, which has nowhere to point us). Any
+    // other failure is a real one — a lost lock or a stale version — and must not be swallowed.
+    private static bool MeansProxyInstead(HttpStatusCode s) =>
+        s is HttpStatusCode.NotFound or HttpStatusCode.NotImplemented;
+
     /// <summary>Download the latest world archive to a temp file and return its path.</summary>
     public async Task<string> DownloadToTempAsync(string passphrase, CancellationToken ct = default)
     {
+        var direct = await TryGetDownloadUrlAsync(passphrase, ct);
+        // An absolute URL bypasses BaseAddress, so this goes straight to the object store.
         using var res = await _http.GetAsync(
-            $"api/download?passphrase={WebUtility.UrlEncode(passphrase)}",
+            direct ?? $"api/download?passphrase={WebUtility.UrlEncode(passphrase)}",
             HttpCompletionOption.ResponseHeadersRead, ct);
         if (!res.IsSuccessStatusCode) throw new CoordinatorException(await ErrorMessage(res));
         var tmp = Path.Combine(Path.GetTempPath(), $"vwk-download-{Guid.NewGuid():N}.zip");
@@ -85,8 +96,54 @@ public sealed class CoordinatorClient(string baseUrl)
         return tmp;
     }
 
+    private async Task<string?> TryGetDownloadUrlAsync(string passphrase, CancellationToken ct)
+    {
+        var res = await _http.GetAsync($"api/download-url?passphrase={WebUtility.UrlEncode(passphrase)}", ct);
+        if (MeansProxyInstead(res.StatusCode)) return null;
+        if (!res.IsSuccessStatusCode) throw new CoordinatorException(await ErrorMessage(res));
+        var json = JsonDocument.Parse(await res.Content.ReadAsStringAsync(ct)).RootElement;
+        return json.GetProperty("url").GetString();
+    }
+
     /// <summary>Upload a world archive. Returns the new version. finish=true also releases the lock.</summary>
     public async Task<int> UploadAsync(string token, string zipPath, bool finish, int baseVersion, CancellationToken ct = default)
+    {
+        var direct = await TryGetUploadUrlAsync(token, baseVersion, ct);
+        if (direct is not { } slot) return await UploadViaCoordinatorAsync(token, zipPath, finish, baseVersion, ct);
+
+        await using (var fs = File.OpenRead(zipPath))
+        {
+            var body = new StreamContent(fs);
+            // The store signed this content type in; sending anything else is a 403.
+            body.Headers.ContentType = new MediaTypeHeaderValue(slot.ContentType);
+            using var put = await _http.PutAsync(slot.Url, body, ct);
+            if (!put.IsSuccessStatusCode)
+                throw new CoordinatorException($"Storage rejected the upload ({(int)put.StatusCode} {put.ReasonPhrase}).");
+        }
+
+        // The upload is staged, not live: this is what promotes it to the world.
+        var res = await _http.PostAsJsonAsync(
+            "api/upload-complete",
+            new { token, uploadId = slot.UploadId, version = slot.Version, finish }, ct);
+        if (!res.IsSuccessStatusCode) throw new CoordinatorException(await ErrorMessage(res));
+        return slot.Version;
+    }
+
+    private async Task<(int Version, string UploadId, string Url, string ContentType)?> TryGetUploadUrlAsync(
+        string token, int baseVersion, CancellationToken ct)
+    {
+        var res = await _http.PostAsJsonAsync("api/upload-url", new { token, baseVersion }, ct);
+        if (MeansProxyInstead(res.StatusCode)) return null;
+        if (!res.IsSuccessStatusCode) throw new CoordinatorException(await ErrorMessage(res));
+        var json = JsonDocument.Parse(await res.Content.ReadAsStringAsync(ct)).RootElement;
+        return (json.GetProperty("version").GetInt32(),
+                json.GetProperty("uploadId").GetString()!,
+                json.GetProperty("url").GetString()!,
+                json.GetProperty("contentType").GetString()!);
+    }
+
+    private async Task<int> UploadViaCoordinatorAsync(
+        string token, string zipPath, bool finish, int baseVersion, CancellationToken ct)
     {
         using var form = new MultipartFormDataContent
         {
