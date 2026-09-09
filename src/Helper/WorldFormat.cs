@@ -57,7 +57,7 @@ public static class WorldFormat
     /// in one session, and a neighbouring field in the same format count *down*), so ordering by it
     /// would be a guess.
     /// </summary>
-    private static string? NewestCompletedSave(string worldFolder)
+    public static string? NewestCompletedSave(string worldFolder)
     {
         try
         {

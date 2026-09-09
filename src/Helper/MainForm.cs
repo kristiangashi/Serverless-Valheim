@@ -466,7 +466,7 @@ public sealed partial class MainForm : Form
                         return;
                     }
                     Log("Unpacking it into your Valheim folder…");
-                    await ExtractInBackgroundAsync(tmp, _config.WorldsFolder);
+                    await ExtractInBackgroundAsync(tmp, _config.WorldsFolder, _config.WorldName);
                 }
                 finally { try { File.Delete(tmp); } catch { } }
                 Log($"World v{version} downloaded into your Valheim folder.");
@@ -515,7 +515,7 @@ public sealed partial class MainForm : Form
         SetBusy(true);
         try
         {
-            if (WorldFiles.ExistingFiles(_config.WorldsFolder, _config.WorldName).Any())
+            if (WorldFiles.WorldExistsLocally(_config.WorldsFolder, _config.WorldName))
             {
                 Log(auto ? "Valheim closed — saving the world…" : "Saving the world…");
                 var fingerprint = WorldFiles.Fingerprint(_config.WorldsFolder, _config.WorldName);
@@ -603,7 +603,7 @@ public sealed partial class MainForm : Form
     {
         if (_token is null || _busy || !_config.AutoSaveWhileHosting) return;
         if (!IsValheimRunning()) return; // only autosave mid-session
-        if (!WorldFiles.ExistingFiles(_config.WorldsFolder, _config.WorldName).Any()) return;
+        if (!WorldFiles.WorldExistsLocally(_config.WorldsFolder, _config.WorldName)) return;
 
         // Nothing new on disk since our last upload: don't spend CPU, disk reads and upstream
         // bandwidth (which the game is sharing with the players) re-sending identical bytes.
@@ -643,13 +643,13 @@ public sealed partial class MainForm : Form
     // Unpacking is the same burst of disk work as zipping, and running it inline froze the window
     // at the end of every download — with the log still reading "Downloading the latest world…",
     // which is indistinguishable from a hang.
-    private static Task ExtractInBackgroundAsync(string zipPath, string worldsFolder) =>
+    private static Task ExtractInBackgroundAsync(string zipPath, string worldsFolder, string worldName) =>
         Task.Run(() =>
         {
             var thread = Thread.CurrentThread;
             var previous = thread.Priority;
             thread.Priority = ThreadPriority.BelowNormal;
-            try { WorldFiles.ExtractInto(zipPath, worldsFolder); }
+            try { WorldFiles.ExtractInto(zipPath, worldsFolder, worldName); }
             finally { thread.Priority = previous; }
         });
 
