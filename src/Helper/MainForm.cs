@@ -449,9 +449,26 @@ public sealed partial class MainForm : Form
                 _progressLastLoggedAt = DateTime.UtcNow;
                 var tmp = await _client.DownloadToTempAsync(
                     _config.GroupPassphrase, new Progress<CoordinatorClient.TransferProgress>(LogDownloadProgress));
-                Log("Unpacking it into your Valheim folder…");
-                await ExtractInBackgroundAsync(tmp, _config.WorldsFolder);
-                try { File.Delete(tmp); } catch { }
+                try
+                {
+                    // Valheim's old and new save layouts live at different paths, so unpacking one
+                    // over the other doesn't replace anything — it leaves both, and the game can no
+                    // longer tell which world is real. Check before writing a single file.
+                    var incoming = WorldFormat.DetectArchive(tmp);
+                    var localWorld = WorldFormat.DetectLocal(_config.WorldsFolder, _config.WorldName);
+                    if (WorldFormat.DescribeIncompatibility(localWorld, incoming, _config.WorldName)
+                        is { } problem)
+                    {
+                        // Don't sit on the lock for a world we were never going to be able to host.
+                        await _client.ReleaseAsync(_token);
+                        _token = null;
+                        Warn(problem);
+                        return;
+                    }
+                    Log("Unpacking it into your Valheim folder…");
+                    await ExtractInBackgroundAsync(tmp, _config.WorldsFolder);
+                }
+                finally { try { File.Delete(tmp); } catch { } }
                 Log($"World v{version} downloaded into your Valheim folder.");
             }
             else if (WorldFiles.WorldExistsLocally(_config.WorldsFolder, _config.WorldName))
