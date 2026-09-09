@@ -25,8 +25,21 @@ public sealed class CoordinatorClient(string baseUrl)
     private readonly HttpClient _http = new()
     {
         BaseAddress = new Uri(baseUrl.TrimEnd('/') + "/"),
-        Timeout = TimeSpan.FromMinutes(10), // large world uploads/downloads
+        // Covers a whole request/response, but only up to the point response headers arrive — under
+        // HttpCompletionOption.ResponseHeadersRead it stops applying to the body, which is why the
+        // download streams under its own stall deadline instead (see StallTimeout).
+        Timeout = TimeSpan.FromMinutes(10), // large world uploads
     };
+
+    /// <summary>Bytes transferred so far, and the total when the server declared one.</summary>
+    public readonly record struct TransferProgress(long Received, long? Total);
+
+    // A world archive is tens of MB over a home connection, so there's no honest ceiling on how
+    // long a healthy download takes — but there is one on how long it may sit completely still.
+    // HttpClient.Timeout can't provide it: once response headers are in, a body read that never
+    // returns (dropped Wi-Fi, a NAT entry reaped mid-transfer, a storage hiccup) blocks forever and
+    // nothing faults it. So watch for progress rather than for elapsed time.
+    private static readonly TimeSpan StallTimeout = TimeSpan.FromSeconds(60);
 
     private static async Task<string> ErrorMessage(HttpResponseMessage res)
     {
@@ -80,7 +93,8 @@ public sealed class CoordinatorClient(string baseUrl)
         s is HttpStatusCode.NotFound or HttpStatusCode.NotImplemented;
 
     /// <summary>Download the latest world archive to a temp file and return its path.</summary>
-    public async Task<string> DownloadToTempAsync(string passphrase, CancellationToken ct = default)
+    public async Task<string> DownloadToTempAsync(
+        string passphrase, IProgress<TransferProgress>? progress = null, CancellationToken ct = default)
     {
         var direct = await TryGetDownloadUrlAsync(passphrase, ct);
         // An absolute URL bypasses BaseAddress, so this goes straight to the object store.
@@ -88,13 +102,77 @@ public sealed class CoordinatorClient(string baseUrl)
             direct ?? $"api/download?passphrase={WebUtility.UrlEncode(passphrase)}",
             HttpCompletionOption.ResponseHeadersRead, ct);
         if (!res.IsSuccessStatusCode) throw new CoordinatorException(await ErrorMessage(res));
+
+        var total = res.Content.Headers.ContentLength;
         var tmp = Path.Combine(Path.GetTempPath(), $"vwk-download-{Guid.NewGuid():N}.zip");
-        await using (var fs = File.Create(tmp))
+        try
         {
-            await res.Content.CopyToAsync(fs, ct);
+            await using var src = await res.Content.ReadAsStreamAsync(ct);
+            await using var fs = File.Create(tmp);
+            await CopyWatchingForStallAsync(src, fs, total, progress, ct);
+        }
+        catch
+        {
+            // A partial archive is worse than none: it would be handed to the extractor and fail
+            // there, blaming the zip instead of the connection that actually broke.
+            try { File.Delete(tmp); } catch { }
+            throw;
         }
         return tmp;
     }
+
+    /// <summary>
+    /// Stream <paramref name="src"/> into <paramref name="dst"/>, giving up if no bytes at all
+    /// arrive for <see cref="StallTimeout"/>. The deadline is per-read, so a slow-but-moving
+    /// transfer runs as long as it needs while a dead one fails promptly and says so.
+    /// </summary>
+    private static async Task CopyWatchingForStallAsync(
+        Stream src, Stream dst, long? total, IProgress<TransferProgress>? progress, CancellationToken ct)
+    {
+        var buffer = new byte[81920];
+        long received = 0;
+        while (true)
+        {
+            int read;
+            using (var stall = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                stall.CancelAfter(StallTimeout);
+                try
+                {
+                    read = await src.ReadAsync(buffer, stall.Token);
+                }
+                // Only ours fired: a caller-requested cancel is theirs to see as a cancellation.
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    throw new CoordinatorException(
+                        $"The download stopped responding after {Describe(received, total)}. " +
+                        "Check your connection, then try hosting again.");
+                }
+                // A reset connection faults the read rather than ending it. Either way the world is
+                // incomplete, and what helps is how far it got — not which socket error surfaced.
+                catch (IOException)
+                {
+                    throw new CoordinatorException(
+                        $"The download broke off after {Describe(received, total)}. Please try hosting again.");
+                }
+            }
+            if (read == 0) break;
+            await dst.WriteAsync(buffer.AsMemory(0, read), ct);
+            received += read;
+            progress?.Report(new TransferProgress(received, total));
+        }
+
+        // A connection cut cleanly mid-transfer ends the stream instead of faulting it, so short
+        // content is the only evidence left that we didn't get the whole world.
+        if (total is { } expected && received < expected)
+            throw new CoordinatorException(
+                $"The download ended early ({Describe(received, total)}). Please try hosting again.");
+    }
+
+    private static string Describe(long received, long? total) =>
+        total is { } t and > 0
+            ? $"{received / 1024d / 1024d:F1} of {t / 1024d / 1024d:F1} MB"
+            : $"{received / 1024d / 1024d:F1} MB";
 
     private async Task<string?> TryGetDownloadUrlAsync(string passphrase, CancellationToken ct)
     {

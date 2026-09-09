@@ -125,6 +125,10 @@ public sealed partial class MainForm : Form
     private FileSystemWatcher? _worldWatcher;
     private string? _lastUploadedFingerprint;
 
+    // Throttling state for LogDownloadProgress.
+    private int _progressLastLoggedPercent;
+    private DateTime _progressLastLoggedAt;
+
     public MainForm()
     {
         _config = AppConfig.Load();
@@ -441,8 +445,12 @@ public sealed partial class MainForm : Form
             if (state.HasWorld)
             {
                 Log("Downloading the latest world…");
-                var tmp = await _client.DownloadToTempAsync(_config.GroupPassphrase);
-                WorldFiles.ExtractInto(tmp, _config.WorldsFolder);
+                _progressLastLoggedPercent = 0;
+                _progressLastLoggedAt = DateTime.UtcNow;
+                var tmp = await _client.DownloadToTempAsync(
+                    _config.GroupPassphrase, new Progress<CoordinatorClient.TransferProgress>(LogDownloadProgress));
+                Log("Unpacking it into your Valheim folder…");
+                await ExtractInBackgroundAsync(tmp, _config.WorldsFolder);
                 try { File.Delete(tmp); } catch { }
                 Log($"World v{version} downloaded into your Valheim folder.");
             }
@@ -614,6 +622,41 @@ public sealed partial class MainForm : Form
             try { return WorldFiles.CreateZip(_config.WorldsFolder, _config.WorldName, compression); }
             finally { thread.Priority = previous; }
         });
+
+    // Unpacking is the same burst of disk work as zipping, and running it inline froze the window
+    // at the end of every download — with the log still reading "Downloading the latest world…",
+    // which is indistinguishable from a hang.
+    private static Task ExtractInBackgroundAsync(string zipPath, string worldsFolder) =>
+        Task.Run(() =>
+        {
+            var thread = Thread.CurrentThread;
+            var previous = thread.Priority;
+            thread.Priority = ThreadPriority.BelowNormal;
+            try { WorldFiles.ExtractInto(zipPath, worldsFolder); }
+            finally { thread.Priority = previous; }
+        });
+
+    // Progress arrives per network chunk, far too often for a log a person reads. Collapse it to a
+    // line every 25% — or, when the server didn't declare a size, one every 10 seconds. Enough for
+    // the download to visibly move (the whole point: a slow transfer shouldn't look like a stuck
+    // one) without burying the rest of the activity log.
+    private void LogDownloadProgress(CoordinatorClient.TransferProgress p)
+    {
+        var mb = p.Received / 1024d / 1024d;
+        if (p.Total is { } total && total > 0)
+        {
+            var percent = (int)(100 * p.Received / total);
+            if (percent < _progressLastLoggedPercent + 25 || percent >= 100) return;
+            _progressLastLoggedPercent = percent - percent % 25;
+            Log($"  …{_progressLastLoggedPercent}% ({mb:F1} of {total / 1024d / 1024d:F1} MB)");
+        }
+        else
+        {
+            if (DateTime.UtcNow - _progressLastLoggedAt < TimeSpan.FromSeconds(10)) return;
+            _progressLastLoggedAt = DateTime.UtcNow;
+            Log($"  …{mb:F1} MB so far");
+        }
+    }
 
     private async Task ShareJoinCodeAsync()
     {
