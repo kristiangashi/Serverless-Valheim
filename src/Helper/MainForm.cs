@@ -567,8 +567,13 @@ public sealed partial class MainForm : Form
             return;
         try
         {
-            _worldWatcher = new FileSystemWatcher(_config.WorldsFolder, _config.WorldName + ".db")
+            // A chunked save is fifty-odd files written in a burst inside a <world> folder; a legacy
+            // one is a single .db sitting beside it. Watch the whole worlds folder rather than one
+            // name — the world folder may not exist yet when hosting starts, and a filter naming a
+            // file that never appears is a watcher that never fires.
+            _worldWatcher = new FileSystemWatcher(_config.WorldsFolder)
             {
+                IncludeSubdirectories = true,
                 NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName,
                 SynchronizingObject = this, // raise events on the UI thread, like the timers
                 EnableRaisingEvents = true,
@@ -576,6 +581,9 @@ public sealed partial class MainForm : Form
             _worldWatcher.Changed += OnWorldWritten;
             _worldWatcher.Created += OnWorldWritten;
             _worldWatcher.Renamed += OnWorldWritten;
+            // A save also removes the map squares it supersedes, and a world whose only change was
+            // a deletion is still a world worth uploading.
+            _worldWatcher.Deleted += OnWorldWritten;
         }
         catch (Exception ex)
         {
@@ -593,10 +601,33 @@ public sealed partial class MainForm : Form
     private void OnWorldWritten(object? sender, FileSystemEventArgs e)
     {
         if (_token is null || !_config.AutoSaveWhileHosting) return;
-        // Debounce: the game writes the .db then shuffles the .old files around, so several events
-        // arrive per save. Restarting the settle timer collapses them into one upload.
+        if (!BelongsToOurWorld(e.FullPath)) return;
+        // Debounce: a chunked save writes the changed map squares, deletes the ones they replace,
+        // then stamps a completion marker — dozens of events for one save. Restarting the settle
+        // timer collapses them into a single upload once the burst goes quiet, which is also what
+        // keeps us from reading a save that's still half-written.
         _tmrSaveSettle.Stop();
         _tmrSaveSettle.Start();
+    }
+
+    /// <summary>
+    /// Whether a path under the worlds folder is part of the world we're hosting. The watcher sees
+    /// every world the player has, plus Valheim's own dated backup copies, and none of those should
+    /// trigger an upload of ours.
+    /// </summary>
+    private bool BelongsToOurWorld(string fullPath)
+    {
+        var world = _config.WorldName;
+        if (string.IsNullOrWhiteSpace(world)) return false;
+        try
+        {
+            var relative = Path.GetRelativePath(_config.WorldsFolder, fullPath);
+            var top = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)[0];
+            // "ArdaCoop" (the folder) or "ArdaCoop.db"; deliberately not "ArdaCoop_backup_...".
+            return top.Equals(world, StringComparison.OrdinalIgnoreCase) ||
+                   top.StartsWith(world + ".", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
     }
 
     private async Task AutoSaveAsync()
