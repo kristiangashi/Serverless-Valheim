@@ -49,23 +49,45 @@ public static class WorldFormat
         fileName.EndsWith(".ok", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
+    /// The other files a save generation is made of, alongside its <c>.ok</c> marker: the chunk
+    /// index, the global data, and the world's metadata. A marker without all three isn't a save,
+    /// it's a leftover.
+    /// </summary>
+    private static readonly string[] SaveParts = [".chunks", ".db2", ".fwl2"];
+
+    /// <summary>
     /// The newest completed save in a world folder, or null if none is complete.
     ///
-    /// Normally there is exactly one — the game deletes the previous generation as it writes the
-    /// next. If a crash left more than one behind, prefer the most recently written rather than the
-    /// highest number: nothing documents how that number advances (we have watched it jump 2 to 4
-    /// in one session, and a neighbouring field in the same format count *down*), so ordering by it
-    /// would be a guess.
+    /// <para>Normally there is exactly one — the game deletes the previous generation as it writes
+    /// the next. If a crash left more than one behind, prefer the most recently written rather than
+    /// the highest number: nothing documents how that number advances (we have watched it jump 2 to
+    /// 4 in one session, and a neighbouring field in the same format count *down*), so ordering by
+    /// it would be a guess.</para>
+    ///
+    /// <para>Candidates must carry the whole generation, not just the marker. Going on the marker's
+    /// timestamp alone means an orphaned <c>.ok</c> — one the game didn't get to delete, or one
+    /// restored from a backup with a fresh timestamp — outranks the real save, and whatever its
+    /// four bytes happen to contain gets read as the save format version.</para>
     /// </summary>
     public static string? NewestCompletedSave(string worldFolder)
     {
         try
         {
             return Directory.EnumerateFiles(worldFolder, "_main.*.ok")
+                .Where(marker => IsCompleteGeneration(worldFolder, marker))
                 .OrderByDescending(File.GetLastWriteTimeUtc)
                 .FirstOrDefault();
         }
         catch { return null; }
+    }
+
+    private static bool IsCompleteGeneration(string worldFolder, string markerPath)
+    {
+        var markerName = Path.GetFileName(markerPath);
+        if (markerName.Length <= "_main.".Length + ".ok".Length) return false;
+        var generation = markerName["_main.".Length..^".ok".Length];
+        return SaveParts.All(part =>
+            File.Exists(Path.Combine(worldFolder, $"_main.{generation}{part}")));
     }
 
     private static int? ReadSaveVersion(Stream marker)
