@@ -449,9 +449,26 @@ public sealed partial class MainForm : Form
                 _progressLastLoggedAt = DateTime.UtcNow;
                 var tmp = await _client.DownloadToTempAsync(
                     _config.GroupPassphrase, new Progress<CoordinatorClient.TransferProgress>(LogDownloadProgress));
-                Log("Unpacking it into your Valheim folder…");
-                await ExtractInBackgroundAsync(tmp, _config.WorldsFolder);
-                try { File.Delete(tmp); } catch { }
+                try
+                {
+                    // Valheim's old and new save layouts live at different paths, so unpacking one
+                    // over the other doesn't replace anything — it leaves both, and the game can no
+                    // longer tell which world is real. Check before writing a single file.
+                    var incoming = WorldFormat.DetectArchive(tmp);
+                    var localWorld = WorldFormat.DetectLocal(_config.WorldsFolder, _config.WorldName);
+                    if (WorldFormat.DescribeIncompatibility(localWorld, incoming, _config.WorldName)
+                        is { } problem)
+                    {
+                        // Don't sit on the lock for a world we were never going to be able to host.
+                        await _client.ReleaseAsync(_token);
+                        _token = null;
+                        Warn(problem);
+                        return;
+                    }
+                    Log("Unpacking it into your Valheim folder…");
+                    await ExtractInBackgroundAsync(tmp, _config.WorldsFolder, _config.WorldName);
+                }
+                finally { try { File.Delete(tmp); } catch { } }
                 Log($"World v{version} downloaded into your Valheim folder.");
             }
             else if (WorldFiles.WorldExistsLocally(_config.WorldsFolder, _config.WorldName))
@@ -498,7 +515,7 @@ public sealed partial class MainForm : Form
         SetBusy(true);
         try
         {
-            if (WorldFiles.ExistingFiles(_config.WorldsFolder, _config.WorldName).Any())
+            if (WorldFiles.WorldExistsLocally(_config.WorldsFolder, _config.WorldName))
             {
                 Log(auto ? "Valheim closed — saving the world…" : "Saving the world…");
                 var fingerprint = WorldFiles.Fingerprint(_config.WorldsFolder, _config.WorldName);
@@ -550,8 +567,13 @@ public sealed partial class MainForm : Form
             return;
         try
         {
-            _worldWatcher = new FileSystemWatcher(_config.WorldsFolder, _config.WorldName + ".db")
+            // A chunked save is fifty-odd files written in a burst inside a <world> folder; a legacy
+            // one is a single .db sitting beside it. Watch the whole worlds folder rather than one
+            // name — the world folder may not exist yet when hosting starts, and a filter naming a
+            // file that never appears is a watcher that never fires.
+            _worldWatcher = new FileSystemWatcher(_config.WorldsFolder)
             {
+                IncludeSubdirectories = true,
                 NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName,
                 SynchronizingObject = this, // raise events on the UI thread, like the timers
                 EnableRaisingEvents = true,
@@ -559,6 +581,9 @@ public sealed partial class MainForm : Form
             _worldWatcher.Changed += OnWorldWritten;
             _worldWatcher.Created += OnWorldWritten;
             _worldWatcher.Renamed += OnWorldWritten;
+            // A save also removes the map squares it supersedes, and a world whose only change was
+            // a deletion is still a world worth uploading.
+            _worldWatcher.Deleted += OnWorldWritten;
         }
         catch (Exception ex)
         {
@@ -576,17 +601,40 @@ public sealed partial class MainForm : Form
     private void OnWorldWritten(object? sender, FileSystemEventArgs e)
     {
         if (_token is null || !_config.AutoSaveWhileHosting) return;
-        // Debounce: the game writes the .db then shuffles the .old files around, so several events
-        // arrive per save. Restarting the settle timer collapses them into one upload.
+        if (!BelongsToOurWorld(e.FullPath)) return;
+        // Debounce: a chunked save writes the changed map squares, deletes the ones they replace,
+        // then stamps a completion marker — dozens of events for one save. Restarting the settle
+        // timer collapses them into a single upload once the burst goes quiet, which is also what
+        // keeps us from reading a save that's still half-written.
         _tmrSaveSettle.Stop();
         _tmrSaveSettle.Start();
+    }
+
+    /// <summary>
+    /// Whether a path under the worlds folder is part of the world we're hosting. The watcher sees
+    /// every world the player has, plus Valheim's own dated backup copies, and none of those should
+    /// trigger an upload of ours.
+    /// </summary>
+    private bool BelongsToOurWorld(string fullPath)
+    {
+        var world = _config.WorldName;
+        if (string.IsNullOrWhiteSpace(world)) return false;
+        try
+        {
+            var relative = Path.GetRelativePath(_config.WorldsFolder, fullPath);
+            var top = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)[0];
+            // "ArdaCoop" (the folder) or "ArdaCoop.db"; deliberately not "ArdaCoop_backup_...".
+            return top.Equals(world, StringComparison.OrdinalIgnoreCase) ||
+                   top.StartsWith(world + ".", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
     }
 
     private async Task AutoSaveAsync()
     {
         if (_token is null || _busy || !_config.AutoSaveWhileHosting) return;
         if (!IsValheimRunning()) return; // only autosave mid-session
-        if (!WorldFiles.ExistingFiles(_config.WorldsFolder, _config.WorldName).Any()) return;
+        if (!WorldFiles.WorldExistsLocally(_config.WorldsFolder, _config.WorldName)) return;
 
         // Nothing new on disk since our last upload: don't spend CPU, disk reads and upstream
         // bandwidth (which the game is sharing with the players) re-sending identical bytes.
@@ -626,13 +674,13 @@ public sealed partial class MainForm : Form
     // Unpacking is the same burst of disk work as zipping, and running it inline froze the window
     // at the end of every download — with the log still reading "Downloading the latest world…",
     // which is indistinguishable from a hang.
-    private static Task ExtractInBackgroundAsync(string zipPath, string worldsFolder) =>
+    private static Task ExtractInBackgroundAsync(string zipPath, string worldsFolder, string worldName) =>
         Task.Run(() =>
         {
             var thread = Thread.CurrentThread;
             var previous = thread.Priority;
             thread.Priority = ThreadPriority.BelowNormal;
-            try { WorldFiles.ExtractInto(zipPath, worldsFolder); }
+            try { WorldFiles.ExtractInto(zipPath, worldsFolder, worldName); }
             finally { thread.Priority = previous; }
         });
 

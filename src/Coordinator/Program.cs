@@ -17,7 +17,9 @@ var dataDir = Path.GetFullPath(Cfg("DATA_DIR", "data"));
 var groupPassphrase = Cfg("GROUP_PASSPHRASE", "valheim");
 var adminPassphrase = Cfg("ADMIN_PASSPHRASE", "changeme-admin");
 var leaseMinutes = int.TryParse(Cfg("LEASE_MINUTES", "5"), out var lm) ? lm : 5;
-var keepVersions = int.TryParse(Cfg("KEEP_VERSIONS", "3"), out var kv) ? kv : 3;
+// Valheim's new folder-based saves come with no local backups of their own — no .db.old rollback,
+// no periodic _backup_auto copies — so these stored versions are the only way back from a bad save.
+var keepVersions = int.TryParse(Cfg("KEEP_VERSIONS", "5"), out var kv) ? kv : 5;
 // Where /download sends friends — GitHub's "latest release" URL serves the newest installer.
 var helperDownloadUrl = Cfg("HELPER_DOWNLOAD_URL",
     "https://github.com/kristiangashi/Serverless-Valheim/releases/latest/download/ValheimWorldKeeper-Setup.exe");
