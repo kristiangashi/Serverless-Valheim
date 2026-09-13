@@ -44,4 +44,8 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{userdesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+; No "skipifsilent" here: the in-app updater runs this installer with /SILENT, and a postinstall
+; entry still fires in silent mode unless that flag is set. With it, an update would close the app
+; and never bring it back. Interactive installs are unaffected - postinstall keeps showing the
+; usual "Launch Valheim World Keeper" tick box on the final page.
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall

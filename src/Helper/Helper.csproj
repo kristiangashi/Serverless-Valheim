@@ -7,7 +7,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>ValheimWorldKeeper</AssemblyName>
-    <Version>1.0.0</Version>
+    <Version>1.3.0</Version>
     <!-- Friends run this on everything from laptops to 4K TVs; scale per-monitor so the window
          re-lays-out when it moves to a display with a different scale factor. -->
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>

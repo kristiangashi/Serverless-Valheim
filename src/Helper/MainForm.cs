@@ -90,6 +90,14 @@ public sealed partial class MainForm : Form
         Font = new Font("Consolas", 9), BorderStyle = BorderStyle.FixedSingle,
     };
 
+    // Build stamp, bottom-right under the activity log. Friends report problems by screenshot, so
+    // having the version visible in the window saves a round trip asking which one they are on.
+    private readonly Label _lblVersion = new()
+    {
+        Text = $"v{AppUpdate.CurrentDisplay}", AutoSize = true, ForeColor = Theme.Muted,
+        TextAlign = ContentAlignment.MiddleRight, Margin = new Padding(3, 4, 3, 0),
+    };
+
     // The row holding Host / Launch / Stop. Hidden outright until the coordinator has told us who
     // holds the world — see UpdateButtons.
     private FlowLayoutPanel _actions = null!;
@@ -335,6 +343,7 @@ public sealed partial class MainForm : Form
         AddRow(_actions);
         AddRow(logLabel);
         AddRow(_txtLog, SizeType.Percent, 100f); // soaks up whatever height is left
+        AddRow(_lblVersion);
         Controls.Add(root);
 
         Theme.Apply(root);
@@ -366,6 +375,69 @@ public sealed partial class MainForm : Form
     {
         base.OnLoad(e);
         ApplyMinimumSize();
+        _ = CheckForUpdatesAsync();
+    }
+
+    /// <summary>
+    /// Offer the newest release, and hand off to its installer if the user accepts.
+    ///
+    /// <para>Startup only, and deliberately so. Updating replaces the exe and restarts the app, so
+    /// doing it mid-session while we hold the world lock would let the lease lapse — and a lapsed
+    /// lease means someone else can claim the world out from under the host. Before the first
+    /// claim there is nothing to lose.</para>
+    /// </summary>
+    private async Task CheckForUpdatesAsync()
+    {
+        AppUpdate.Release release;
+        try
+        {
+            if (await AppUpdate.CheckAsync() is not { } found) return; // already current
+            release = found;
+        }
+        catch (Exception ex)
+        {
+            // No network, GitHub down, or the hourly anonymous API limit reached all mean "can't
+            // tell" — never a reason to hold up an app that works perfectly well without this.
+            Log($"Couldn't check for updates: {ex.Message}");
+            return;
+        }
+
+        var latest = AppUpdate.Format(release.Version);
+        Log($"Update available: v{latest} (this is v{AppUpdate.CurrentDisplay}).");
+
+        var answer = MessageBox.Show(
+            $"Version {latest} is available — you have {AppUpdate.CurrentDisplay}.\n\n" +
+            "The app will close, install the update, and reopen by itself.",
+            "Update available", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (answer != DialogResult.Yes)
+        {
+            Log("Update skipped. It will be offered again next time the app starts.");
+            return;
+        }
+
+        // The prompt is modal to this form but the timers keep running behind it, so by the time
+        // the answer comes back auto-launch may have claimed the world. Re-check rather than trust
+        // the state we had when the dialog opened.
+        if (_token is not null || _busy)
+        {
+            Warn("You started hosting while that dialog was open, so the update was left for later. " +
+                 "Finish hosting, then restart the app to install it.");
+            return;
+        }
+
+        try
+        {
+            Log("Downloading the update…");
+            var installer = await AppUpdate.DownloadAsync(release);
+            Log("Starting the installer — the app will reopen when it finishes.");
+            AppUpdate.Launch(installer);
+            Close();
+        }
+        catch (Exception ex)
+        {
+            Warn($"The update couldn't be installed: {ex.Message}\n\n" +
+                 "The app will keep working on the version you have.");
+        }
     }
 
     // The window must not be resizable small enough to hide a control, so the floor is measured
