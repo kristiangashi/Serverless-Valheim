@@ -528,7 +528,33 @@ public sealed partial class MainForm : Form
                     // longer tell which world is real. Check before writing a single file.
                     var incoming = WorldFormat.DetectArchive(tmp);
                     var localWorld = WorldFormat.DetectLocal(_config.WorldsFolder, _config.WorldName);
-                    if (WorldFormat.DescribeIncompatibility(localWorld, incoming, _config.WorldName)
+
+                    // A legacy world here with a chunked one on the server isn't a conflict to
+                    // refuse — it's the one-time migration every player makes when they update
+                    // Valheim. Offer it instead of explaining the mismatch at them.
+                    if (WorldFormat.CanMigrateToChunked(localWorld, incoming))
+                    {
+                        var migrate = MessageBox.Show(
+                            "You're still using the old saving format. Migrate to new save format?\n\n" +
+                            "Your current world won't be deleted — it stays in your Valheim folder " +
+                            "under a dated name, so you can go back to it whenever you want.",
+                            "Valheim World Keeper", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                        if (migrate != DialogResult.Yes)
+                        {
+                            await _client.ReleaseAsync(_token);
+                            _token = null;
+                            Log("Migration declined — nothing was written to your Valheim folder.");
+                            return;
+                        }
+
+                        // Before a single file is unpacked: the new save is a folder named after
+                        // the world, so it doesn't overwrite the old .db/.fwl, it lands beside
+                        // them. Moving them out of the way first is what stops Valheim ending up
+                        // with two worlds under one name.
+                        foreach (var path in WorldFiles.ArchiveLegacyWorld(_config.WorldsFolder, _config.WorldName))
+                            Log($"Archived your old-format save as {Path.GetFileName(path)}");
+                    }
+                    else if (WorldFormat.DescribeIncompatibility(localWorld, incoming, _config.WorldName)
                         is { } problem)
                     {
                         // Don't sit on the lock for a world we were never going to be able to host.

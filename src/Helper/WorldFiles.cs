@@ -3,7 +3,8 @@ using System.IO.Compression;
 
 namespace Helper;
 
-/// <summary>
+
+    /// <summary>
 /// The files making up one world, plus where they live.
 ///
 /// <para><see cref="Root"/> is the folder the archive's entries are relative to — the world folder
@@ -222,6 +223,48 @@ public static class WorldFiles
         if (set.Marker is null) return "";
         try { return $"{set.Marker}:{File.GetLastWriteTimeUtc(set.Marker).Ticks}"; }
         catch { return "gone"; }
+    }
+
+    /// <summary>
+    /// Move a legacy <c>.db</c>/<c>.fwl</c> pair aside so a chunked save can take over the world's
+    /// name, and return where they went.
+    ///
+    /// <para>Renamed rather than copied or deleted. A rename moves no bytes, so it is instant even
+    /// for a 40 MB world, and it cannot half-succeed into a lost world the way a copy-then-delete
+    /// can. The suffix is what hides them: Valheim finds a legacy world by looking for
+    /// <c>&lt;name&gt;.db</c>, so a file whose extension is no longer <c>.db</c> stops being a
+    /// world to it — while staying beside the world it came from, under a name a player can
+    /// recognise, rather than being spirited off to a temp folder.</para>
+    ///
+    /// <para>If the second rename fails the first is put back, because a world with its
+    /// <c>.db</c> moved and its <c>.fwl</c> still in place is neither the old world nor a clean
+    /// slate, and the player would have no way to tell what happened.</para>
+    /// </summary>
+    public static IReadOnlyList<string> ArchiveLegacyWorld(string worldsFolder, string worldName)
+    {
+        var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+        var moved = new List<(string From, string To)>();
+        try
+        {
+            foreach (var extension in LegacyExtensions)
+            {
+                var source = Path.Combine(worldsFolder, worldName + extension);
+                if (!File.Exists(source)) continue;
+                var destination = $"{source}.oldformat-{stamp}";
+                File.Move(source, destination);
+                moved.Add((source, destination));
+            }
+        }
+        catch
+        {
+            foreach (var (from, to) in moved)
+            {
+                try { File.Move(to, from); } catch { /* best effort; the throw below is the story */ }
+            }
+            throw;
+        }
+
+        return moved.Select(m => m.To).ToList();
     }
 
     /// <summary>
