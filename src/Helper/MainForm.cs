@@ -535,7 +535,9 @@ public sealed partial class MainForm : Form
                     if (WorldFormat.CanMigrateToChunked(localWorld, incoming))
                     {
                         var migrate = MessageBox.Show(
-                            "You're still using the old saving format. Migrate to new save format?",
+                            "You're still using the old saving format. Migrate to new save format?\n\n" +
+                            "Your current world won't be deleted — it stays in your Valheim folder " +
+                            "under a dated name, so you can go back to it whenever you want.",
                             "Valheim World Keeper", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                         if (migrate != DialogResult.Yes)
                         {
