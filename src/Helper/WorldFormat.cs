@@ -158,6 +158,20 @@ public static class WorldFormat
     }
 
     /// <summary>
+    /// Whether the player still has the old single-file world while the server holds the new
+    /// folder one — the one format mismatch that isn't a conflict to refuse but the migration
+    /// every player makes exactly once.
+    ///
+    /// <para><see cref="DescribeIncompatibility"/> still rejects this combination, deliberately.
+    /// Migrating is opt-in and destructive-looking to a player, so a caller that doesn't know
+    /// about it must refuse rather than unpack a chunked save on top of a legacy one and leave
+    /// two worlds under a single name. The caller that does offer it is responsible for moving
+    /// the legacy files aside first — see <see cref="WorldFiles.ArchiveLegacyWorld"/>.</para>
+    /// </summary>
+    public static bool CanMigrateToChunked(WorldFormatInfo local, WorldFormatInfo incoming) =>
+        local.Format is WorldSaveFormat.Legacy && incoming.Format is WorldSaveFormat.Chunked;
+
+    /// <summary>
     /// Whether <paramref name="incoming"/> can be unpacked over <paramref name="local"/>. Null when
     /// it can; otherwise a message to show the player.
     /// </summary>
